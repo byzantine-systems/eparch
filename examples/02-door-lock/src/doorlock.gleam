@@ -23,8 +23,8 @@
 //// }
 //// ```
 
-import gleam/erlang/process
 import eparch/state_machine as sm
+import gleam/erlang/process
 
 // Public types
 pub type State {

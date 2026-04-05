@@ -7,10 +7,10 @@
 //// expected reply as a side-effect before returning its Step.
 ////
 
-import gleam/erlang/process
-import gleeunit/should
 import doorlock
 import eparch/state_machine as sm
+import gleam/erlang/process
+import gleeunit/should
 
 // Constants & Helpers
 const code = "1234"
