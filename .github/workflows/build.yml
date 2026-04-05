@@ -35,7 +35,7 @@ jobs:
 
       - name: "[Gleam] Run Testing Suite"
         run: |
-          nix develop --command sh -c "gleam test"
+          nix develop --impure --command gleam test
 
   test-examples:
     name: "[Examples] ${{ matrix.example }}"
@@ -43,8 +43,8 @@ jobs:
     strategy:
       matrix:
         example:
-          - examples/01-pushbutton
-          - examples/02-doorlock
+          - ./examples/01-push-button
+          - ./examples/02-door-lock
     steps:
       - uses: actions/checkout@v6
 
@@ -56,5 +56,6 @@ jobs:
           name: devenv
 
       - name: "[Gleam] Build and Test"
+        working-directory: ${{ matrix.example }}
         run: |
-          nix develop --command sh -c "cd ${{ matrix.example }} && gleam test"
+          nix develop "${{ github.workspace }}" --impure --command gleam test

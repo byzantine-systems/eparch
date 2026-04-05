@@ -6,9 +6,9 @@
 //// name collisions across sections.
 ////
 
+import eparch/state_machine
 import gleam/erlang/process
 import gleeunit/should
-import eparch/state_machine
 
 // STOP
 type StopState {
@@ -67,7 +67,8 @@ fn postpone_handler(
     state_machine.Info(Action(_)), PostWaiting ->
       state_machine.keep_state(data, [state_machine.Postpone])
 
-    state_machine.Info(Go), PostWaiting -> state_machine.next_state(PostReady, data, [])
+    state_machine.Info(Go), PostWaiting ->
+      state_machine.next_state(PostReady, data, [])
 
     state_machine.Info(Action(reply_with: reply_sub)), PostReady -> {
       process.send(reply_sub, "handled")
@@ -113,7 +114,9 @@ fn next_event_handler(
 ) -> state_machine.Step(NextEventState, Nil, NextEventMsg, Nil) {
   case event {
     state_machine.Info(Trigger(reply_with: reply_sub)) ->
-      state_machine.keep_state(data, [state_machine.NextEvent(Derived(reply_sub))])
+      state_machine.keep_state(data, [
+        state_machine.NextEvent(Derived(reply_sub)),
+      ])
 
     state_machine.Cast(Derived(reply_with: reply_sub)) -> {
       process.send(reply_sub, "derived")
@@ -208,7 +211,8 @@ fn cancel_handler(
     state_machine.Info(CActivate), CIdle ->
       state_machine.next_state(CActive, data, [state_machine.StateTimeout(5000)])
 
-    state_machine.Info(CLeave), CActive -> state_machine.next_state(CDone, data, [])
+    state_machine.Info(CLeave), CActive ->
+      state_machine.next_state(CDone, data, [])
 
     state_machine.Info(CGetState(reply_with: reply_sub)), _ -> {
       process.send(reply_sub, state)

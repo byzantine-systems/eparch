@@ -24,7 +24,7 @@ jobs:
 
       - name: "[Gleam] Build the package's documentation"
         run: |
-          devenv shell -- gleam docs build
+          nix develop --impure --command gleam docs build
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -50,6 +50,6 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Publish to Hex
-        run: nix run 'nixpkgs#gleam' -- publish --yes
+        run: nix develop --impure --command gleam publish --yes
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

@@ -9,9 +9,9 @@
 //// the `gen_statem` runtime.
 ////
 
+import eparch/state_machine as sm
 import gleeunit/should
 import pushbutton
-import eparch/state_machine as sm
 
 /// Pushing when Off transitions to On and increments the counter.
 /// The caller receives the count *before* the increment (0 -> reply 0, data 1).
@@ -100,11 +100,7 @@ pub fn count_equals_number_of_on_cycles_test() {
   // -> On, data=3
 
   // GetCount while On must report 3 without changing state.
-  pushbutton.handle_event(
-    sm.Call(from, pushbutton.GetCount),
-    pushbutton.On,
-    3,
-  )
+  pushbutton.handle_event(sm.Call(from, pushbutton.GetCount), pushbutton.On, 3)
   |> should.equal(sm.KeepState(3, [sm.Reply(from, 3)]))
 }
 
