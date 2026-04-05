@@ -9,9 +9,9 @@
 //// so timeout tests complete quickly without sleeping for 5 seconds.
 ////
 
+import doorlock
 import gleam/erlang/process
 import gleeunit/should
-import doorlock
 
 // Constants & Helpers
 const code = "secret"

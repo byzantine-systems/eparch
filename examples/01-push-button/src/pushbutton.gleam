@@ -23,8 +23,8 @@
 //// }
 //// ```
 
-import gleam/erlang/process
 import eparch/state_machine as sm
+import gleam/erlang/process
 
 // Types
 
@@ -72,13 +72,11 @@ pub fn handle_event(
     // On + Push -> Off. 
     // - Count is unchanged.
     // - Reply is the current count
-    sm.Call(from, Push), On ->
-      sm.NextState(Off, data, [sm.Reply(from, data)])
+    sm.Call(from, Push), On -> sm.NextState(Off, data, [sm.Reply(from, data)])
 
     // GetCount is valid in any state
     // reply with count without changing state.
-    sm.Call(from, GetCount), _ ->
-      sm.KeepState(data, [sm.Reply(from, data)])
+    sm.Call(from, GetCount), _ -> sm.KeepState(data, [sm.Reply(from, data)])
 
     // Any other event (casts, info, timeouts) is silently ignored.
     _, _ -> sm.KeepState(data, [])
