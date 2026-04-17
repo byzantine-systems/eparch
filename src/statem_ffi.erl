@@ -7,7 +7,7 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 -behaviour(gen_statem).
 
 %% Public API
--export([do_start/7, cast/2, from_for_testing/0]).
+-export([do_start/7, cast/2]).
 
 %% gen_statem callbacks
 -export([
@@ -19,8 +19,10 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 ]).
 
 %%%===================================================================
-%%% Internal state record
+%%% Internal State Records & Types
 %%%===================================================================
+-type process_name_option() :: none | {some, Name :: string()}.
+-type state_enter_option() :: state_enter_disabled | state_enter_enabled.
 
 -record(gleam_statem, {
     % Current Gleam state value
@@ -32,10 +34,9 @@ gen_statem behavior callbacks and Gleam's type-safe API.
     % Whether `StateEnter` events reach the Gleam handler
     state_enter,
     % The tag used in this process's Subject:
-    subject_tag,
     % - unnamed: reference (make_ref())
     % - named: atom (the registered name)
-
+    subject_tag,
     % none | {some, fn(data) -> data}
     on_code_change
 }).
@@ -45,20 +46,20 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 %%% called from Gleam via @external
 %%%===================================================================
 -doc """
-Creates a dummy `gen_statem:from()` value for use in unit tests.
-
-`gen_statem:from()` is `{Pid, Tag}` internally. The returned value is only
-ever used for equality comparisons in pure unit tests, it is never
-passed to `gen_statem:reply/2`.
-""".
--spec from_for_testing() -> {pid(), reference()}.
-from_for_testing() ->
-    {self(), make_ref()}.
-
--doc """
-Start a `gen_statem` process linked to the caller and return the Subject 
+Start a `gen_statem` process linked to the caller and return the Subject
 needed to send messages to it
 """.
+-spec do_start(InitialState, InitialData, Handler, StateEnter, TimeOut, Name, OnCodeChange) ->
+    Result
+when
+    InitialState :: any(),
+    InitialData :: any(),
+    Handler :: any(),
+    StateEnter :: state_enter_option(),
+    TimeOut :: timeout(),
+    Name :: process_name_option(),
+    OnCodeChange :: any(),
+    Result :: any().
 do_start(InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeChange) ->
     %% Ack channel: a unique reference the child process will use to
     %% send us the Subject it creates in init/1.
@@ -75,6 +76,8 @@ do_start(InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeCh
                 gen_statem:start_link(?MODULE, InitArgs, [{timeout, Timeout}]);
             {some, ProcessName} ->
                 gen_statem:start_link(
+                    %% TODO: Change this to support other formats
+                    %% https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:server_name/0
                     {local, ProcessName},
                     ?MODULE,
                     InitArgs,
@@ -85,13 +88,13 @@ do_start(InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeCh
     case StartResult of
         {ok, Pid} ->
             %% init/1 runs synchronously inside start_link, so the Subject
-            %% is already waiting in our mailbox.  Use after 0 as a safety
-            %% net; in practice the message is always there.
+            %% is already waiting in our mailbox. Use after 0 as a safety net,
+            %% in practice the message is always there.
             receive
                 {AckTag, Subject} ->
                     {ok, {started, Pid, Subject}}
             after 0 ->
-                %% Should never happen — indicates a bug in init/1.
+                %% Should "never" happen, indicates a bug in init/1.
                 {error, {init_failed, <<"init/1 did not deliver a Subject">>}}
             end;
         {error, timeout} ->
@@ -228,7 +231,7 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
         {call, From} ->
             %% Synchronous gen_statem call (Erlang interop).
             %% Gleam: Call(from: From(reply), message: msg)
-            %% From is an external type — passed through as-is.
+            %% From is an external type, passed through as-is.
             {call, From, EventContent};
         cast ->
             %% Asynchronous gen_statem cast (Erlang interop).
@@ -263,7 +266,7 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
             %% Map to Cast so the user pattern-matches them as Cast(msg).
             {cast, EventContent};
         _Other ->
-            %% Truly unknown event type — wrap as Info so the user can handle
+            %% Truly unknown event type, wrap as Info so the user can handle
             %% or ignore it in their catch-all clause.
             {info, {unexpected_event, EventType, EventContent}}
     end.
@@ -308,7 +311,7 @@ convert_action_to_erlang(Action) ->
     case Action of
         {reply, From, Response} ->
             %% Reply to a gen_statem:call caller.
-            %% From is the external type — the raw gen_statem:from() term.
+            %% From is the external type, the raw gen_statem:from() term.
             {reply, From, Response};
         postpone ->
             postpone;
@@ -317,7 +320,13 @@ convert_action_to_erlang(Action) ->
         {state_timeout, Milliseconds} ->
             {state_timeout, Milliseconds, timeout};
         {generic_timeout, Name, Milliseconds} ->
-            {{timeout, Name}, Milliseconds, timeout}
+            {{timeout, Name}, Milliseconds, timeout};
+        {change_callback_module, Module} ->
+            {change_callback_module, Module};
+        {push_callback_module, Module} ->
+            {push_callback_module, Module};
+        pop_callback_module ->
+            pop_callback_module
     end.
 
 -doc """

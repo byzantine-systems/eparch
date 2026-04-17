@@ -16,3 +16,8 @@ result
 
 # pre-commit
 .pre-commit-config.yaml
+
+# Example projects use a path dep on the parent library, so their
+# lockfiles drift every time the root version bumps and provide no
+# reproducibility value. Let each build regenerate them fresh.
+examples/*/manifest.toml

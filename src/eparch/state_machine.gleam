@@ -10,6 +10,7 @@
 //// - Returns strongly-typed Steps instead of various tuple formats
 ////
 
+import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type ExitReason, type Pid, type Subject}
 import gleam/option.{type Option, None, Some}
 
@@ -98,6 +99,19 @@ pub type Action(msg, reply) {
 
   /// Set a generic named timeout
   GenericTimeout(name: String, milliseconds: Int)
+
+  /// Change the gen_statem callback module to `module`.
+  /// The new module receives the internal `#gleam_statem` record as its data,
+  /// use only for Erlang interop with modules that understand eparch's internals.
+  ChangeCallbackModule(module: Atom)
+
+  /// Push the current callback module onto an internal stack and switch to `module`.
+  /// Pop with `PopCallbackModule` to restore. Otherwise like `ChangeCallbackModule`.
+  PushCallbackModule(module: Atom)
+
+  /// Pop the top module from the internal callback-module stack and switch to it.
+  /// Fails the server if the stack is empty.
+  PopCallbackModule
 }
 
 /// Types of timeouts
@@ -110,7 +124,7 @@ pub type TimeoutType {
 ///
 /// Represents Erlang's `gen_statem:from()` type. Values of this type
 /// only ever originate from a `Call` event delivered by the gen_statem
-/// runtime, or from `from_for_testing/0` in unit tests.
+/// runtime.
 ///
 pub type From(reply)
 
@@ -415,19 +429,60 @@ pub fn generic_timeout(name: String, milliseconds: Int) -> Action(msg, reply) {
   GenericTimeout(name:, milliseconds:)
 }
 
-/// Create a dummy `From` value for use in unit tests only.
+/// Create a ChangeCallbackModule action.
 ///
-/// Because `From` is an external type with no Gleam constructor, handler
-/// functions cannot be called with a real `From` outside of the gen_statem
-/// infrastructure. This function produces a value that lets you exercise
-/// `Call` events in pure unit tests without starting an actual state machine
-/// process.
+/// Swaps the gen_statem callback module at runtime. The new module receives
+/// the internal `#gleam_statem` record as its data, so it must be an Erlang
+/// module written to understand eparch internals. Use only for advanced
+/// Erlang interop; most applications should not need this.
 ///
-/// In production code, `From` values always originate from a `Call` event
-/// delivered by the gen_statem runtime.
+/// Since OTP 22.3.
 ///
-@external(erlang, "statem_ffi", "from_for_testing")
-pub fn from_for_testing() -> From(reply)
+/// ## Example
+///
+/// ```gleam
+/// state_machine.change_callback_module(atom.create("my_erlang_module"))
+/// ```
+///
+pub fn change_callback_module(module: Atom) -> Action(msg, reply) {
+  ChangeCallbackModule(module:)
+}
+
+/// Create a PushCallbackModule action.
+///
+/// Pushes the current callback module onto an internal stack and switches
+/// to `module`. Restore the previous module with `pop_callback_module`.
+/// Same data-sharing caveats as `change_callback_module` apply.
+///
+/// Since OTP 22.3.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.push_callback_module(atom.create("my_erlang_module"))
+/// ```
+///
+pub fn push_callback_module(module: Atom) -> Action(msg, reply) {
+  PushCallbackModule(module:)
+}
+
+/// Create a PopCallbackModule action.
+///
+/// Pops the top module off the callback-module stack and switches to it.
+/// Fails the server if the stack is empty, so only use after a matching
+/// `push_callback_module`.
+///
+/// Since OTP 22.3.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.pop_callback_module()
+/// ```
+///
+pub fn pop_callback_module() -> Action(msg, reply) {
+  PopCallbackModule
+}
 
 /// Reply and transition to a new state.
 ///
@@ -465,7 +520,7 @@ pub fn reply_and_keep(
 /// Send a message to a state machine via `process.send` (arrives as `Info`).
 ///
 /// The message is delivered to the handler as `Info(msg)`. Use this for
-/// messages sent from processes that are not aware of this library — e.g.
+/// messages sent from processes that are not aware of this library, e.g.
 /// monitors, timers, or plain Erlang processes.
 ///
 /// To deliver messages as `Cast(msg)` instead, use `cast/2`.

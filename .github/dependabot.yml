@@ -7,3 +7,8 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "ci:"
+    # This block groups all updates for this ecosystem together
+    groups:
+      github-actions-deps:
+        patterns:
+          - "*"
