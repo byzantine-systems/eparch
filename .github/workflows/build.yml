@@ -37,25 +37,6 @@ jobs:
         run: |
           nix develop --impure --command gleam test
 
-  test-examples:
-    name: "[Examples] ${{ matrix.example }}"
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        example:
-          - ./examples/01-push-button
-          - ./examples/02-door-lock
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - uses: cachix/cachix-action@v17
-        with:
-          name: devenv
-
-      - name: "[Gleam] Build and Test"
-        working-directory: ${{ matrix.example }}
+      - name: "[Gleam] Check if all examples still work"
         run: |
-          nix develop "${{ github.workspace }}" --impure --command gleam test
+          nix develop --impure --command make

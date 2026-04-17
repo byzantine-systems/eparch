@@ -84,6 +84,9 @@
                 # Erlang tooling
                 erlfmt
                 erlang-language-platform
+
+                # Extra tooling
+                gnumake
               ]
               ++ [ config.packages.default ];
 

@@ -7,6 +7,7 @@
 ////
 
 import eparch/state_machine
+import gleam/erlang/atom
 import gleam/erlang/process
 import gleeunit/should
 
@@ -337,4 +338,89 @@ pub fn send_delivers_message_as_info_not_cast_test() {
   state_machine.send(machine.data, Ping(reply_with: reply_sub))
 
   process.receive(reply_sub, 50) |> should.equal(Error(Nil))
+}
+
+// CHANGE CALLBACK MODULE
+//
+// Switching to `statem_ffi` itself is a safe no-op: the machine keeps the
+// same behaviour but exercises the FFI translation path end-to-end.
+type CbState {
+  CbListening
+}
+
+type CbMsg {
+  CbSwitch
+  CbPing(reply_with: process.Subject(String))
+}
+
+fn change_callback_handler(
+  event: state_machine.Event(CbState, CbMsg, Nil),
+  _state: CbState,
+  data: Nil,
+) -> state_machine.Step(CbState, Nil, CbMsg, Nil) {
+  case event {
+    state_machine.Info(CbSwitch) ->
+      state_machine.keep_state(data, [
+        state_machine.change_callback_module(atom.create("statem_ffi")),
+      ])
+
+    state_machine.Info(CbPing(reply_with: reply_sub)) -> {
+      process.send(reply_sub, "pong")
+      state_machine.keep_state(data, [])
+    }
+
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn change_callback_module_keeps_machine_alive_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: CbListening, initial_data: Nil)
+    |> state_machine.on_event(change_callback_handler)
+    |> state_machine.start
+
+  process.send(machine.data, CbSwitch)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, CbPing(reply_with: reply_sub))
+
+  let assert Ok(reply) = process.receive(reply_sub, 1000)
+  reply |> should.equal("pong")
+}
+
+// PUSH / POP CALLBACK MODULE
+fn push_pop_handler(
+  event: state_machine.Event(CbState, CbMsg, Nil),
+  _state: CbState,
+  data: Nil,
+) -> state_machine.Step(CbState, Nil, CbMsg, Nil) {
+  case event {
+    state_machine.Info(CbSwitch) ->
+      state_machine.keep_state(data, [
+        state_machine.push_callback_module(atom.create("statem_ffi")),
+        state_machine.pop_callback_module(),
+      ])
+
+    state_machine.Info(CbPing(reply_with: reply_sub)) -> {
+      process.send(reply_sub, "pong")
+      state_machine.keep_state(data, [])
+    }
+
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn push_then_pop_callback_module_roundtrip_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: CbListening, initial_data: Nil)
+    |> state_machine.on_event(push_pop_handler)
+    |> state_machine.start
+
+  process.send(machine.data, CbSwitch)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, CbPing(reply_with: reply_sub))
+
+  let assert Ok(reply) = process.receive(reply_sub, 1000)
+  reply |> should.equal("pong")
 }

@@ -43,7 +43,6 @@ every installed instance distinguishable.
 %%%===================================================================
 %%% Internal handler state
 %%%===================================================================
-
 -record(gleam_handler, {
     % The unique reference part of {event_manager_ffi, Ref}
     ref,
