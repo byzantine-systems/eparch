@@ -307,3 +307,105 @@ pub fn handler_without_format_status_still_appears_in_status_test() {
 
   event_manager.stop(mgr)
 }
+
+// ---------------------------------------------------------------------------
+// START MONITOR
+//
+// start_monitor/0,1,2 (OTP 23.0+) starts the manager linked to the caller
+// and atomically returns a monitor. The monitor fires when the manager
+// exits.
+// ---------------------------------------------------------------------------
+
+type StartMonitorMsg {
+  StartMonitorPing(reply_with: process.Subject(String))
+}
+
+pub fn start_monitor_returns_manager_and_monitor_test() {
+  let assert Ok(monitored) =
+    event_manager.start_monitor(event_manager.new_start_options())
+
+  let handler =
+    event_manager.new_handler(Nil, fn(event, state) {
+      case event {
+        StartMonitorPing(reply_with: subject) -> {
+          process.send(subject, "pong")
+          event_manager.Continue(state)
+        }
+      }
+    })
+
+  let assert Ok(_ref) = event_manager.add_handler(monitored.manager, handler)
+
+  let reply_subject = process.new_subject()
+  event_manager.sync_notify(
+    monitored.manager,
+    StartMonitorPing(reply_with: reply_subject),
+  )
+
+  let assert Ok(reply) = process.receive(reply_subject, 1000)
+  reply |> should.equal("pong")
+
+  event_manager.stop(monitored.manager)
+}
+
+pub fn start_monitor_fires_monitor_on_stop_test() {
+  let assert Ok(monitored) =
+    event_manager.start_monitor(event_manager.new_start_options())
+
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(monitored.monitor, fn(down) { down })
+
+  event_manager.stop(monitored.manager)
+
+  let assert Ok(_down) = process.selector_receive(from: selector, within: 1000)
+}
+
+pub fn start_monitor_with_name_registers_process_test() {
+  let name = process.new_name("eparch_event_manager_test_")
+  let options =
+    event_manager.new_start_options()
+    |> event_manager.with_name(name)
+
+  let assert Ok(monitored) = event_manager.start_monitor(options)
+
+  let assert Ok(registered_pid) = process.named(name)
+  registered_pid |> should.equal(event_manager.manager_pid(monitored.manager))
+
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(monitored.monitor, fn(down) { down })
+
+  event_manager.stop(monitored.manager)
+
+  let assert Ok(_down) = process.selector_receive(from: selector, within: 1000)
+}
+
+pub fn start_monitor_already_started_returns_error_test() {
+  let name = process.new_name("eparch_event_manager_dup_test_")
+  let options =
+    event_manager.new_start_options()
+    |> event_manager.with_name(name)
+
+  let assert Ok(monitored) = event_manager.start_monitor(options)
+  let first_pid = event_manager.manager_pid(monitored.manager)
+
+  let assert Error(event_manager.AlreadyStarted(reported_pid)) =
+    event_manager.start_monitor(options)
+  reported_pid |> should.equal(first_pid)
+
+  event_manager.stop(monitored.manager)
+}
+
+pub fn start_monitor_accepts_option_passthrough_test() {
+  let options =
+    event_manager.new_start_options()
+    |> event_manager.with_timeout(event_manager.Milliseconds(5000))
+    |> event_manager.with_spawn_options([
+      event_manager.SpawnPriority(event_manager.PriorityNormal),
+    ])
+
+  let assert Ok(monitored) = event_manager.start_monitor(options)
+
+  event_manager.stop(monitored.manager)
+}

@@ -17,26 +17,27 @@
 ////
 //// type MyEvent { LogLine(String) | Flush(process.Subject(Nil)) }
 ////
-//// let assert Ok(mgr) = event_manager.start()
-////
-//// let handler =
-////   event_manager.new_handler(0, fn(event, count) {
-////     case event {
-////       LogLine(_) -> event_manager.Continue(count + 1)
-////       Flush(reply) -> {
-////         process.send(reply, Nil)
-////         event_manager.Continue(count)
-////       }
-////     }
-////   })
-////
-//// let assert Ok(_ref) = event_manager.add_handler(mgr, handler)
-////
-//// event_manager.notify(mgr, LogLine("hello"))
-//// event_manager.sync_notify(mgr, LogLine("world"))
+//// case event_manager.start() {
+////   Ok(manager) -> {
+////     let handler =
+////       event_manager.new_handler(0, fn(event, count) {
+////         case event {
+////           LogLine(_) -> event_manager.Continue(count + 1)
+////           Flush(reply) -> {
+////             process.send(reply, Nil)
+////             event_manager.Continue(count)
+////           }
+////         }
+////       })
+////     let _ = event_manager.add_handler(manager, handler)
+////     event_manager.notify(manager, LogLine("hello"))
+////     event_manager.sync_notify(manager, LogLine("world"))
+////   }
+////   Error(_) -> Nil
+//// }
 //// ```
 
-import gleam/erlang/process.{type Pid}
+import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
 
 /// The result of a handler processing an event.
@@ -54,20 +55,92 @@ pub type EventStep(state) {
 
 /// Errors that can occur when starting an event manager.
 pub type StartError {
-  AlreadyStarted
-  StartFailed(String)
+  /// A manager with the requested registered name is already running.
+  /// The field carries the Pid of the already-running manager so callers can
+  /// reuse it or diagnose the conflict.
+  AlreadyStarted(pid: Pid)
+  /// Startup failed for another reason. `reason` is a human-readable string
+  /// produced from the raw Erlang error term.
+  StartFailed(reason: String)
+}
+
+/// A timeout: either a fixed number of milliseconds or `Infinity`.
+pub type Timeout {
+  Infinity
+  Milliseconds(ms: Int)
+}
+
+/// Process priority for `SpawnPriority`.
+pub type Priority {
+  PriorityLow
+  PriorityNormal
+  PriorityHigh
+  PriorityMax
+}
+
+/// Message queue storage mode for `SpawnMessageQueueData`.
+pub type MessageQueueMode {
+  OnHeap
+  OffHeap
+}
+
+/// Flags for the `debug` option of `StartOptions`.
+pub type DebugFlag {
+  DebugTrace
+  DebugLog
+  DebugStatistics
+  DebugLogToFile(file_name: String)
+}
+
+/// Flags for the `spawn_options` option of `StartOptions`. Subset of
+/// `erlang:spawn_opt/2`'s options that are meaningful for a long-running
+/// server process. `link` and `monitor` are intentionally omitted — the
+/// manager is always linked (and optionally monitored) by the `start` /
+/// `start_monitor` entry points themselves.
+pub type SpawnOption {
+  SpawnPriority(level: Priority)
+  SpawnFullsweepAfter(count: Int)
+  SpawnMinHeapSize(size: Int)
+  SpawnMinBinVheapSize(size: Int)
+  SpawnMaxHeapSize(size: Int)
+  SpawnMessageQueueData(mode: MessageQueueMode)
+}
+
+/// Options for `start_monitor`. Build a value with `new_start_options()` and
+/// extend it using the `with_*` setter functions.
+///
+pub opaque type StartOptions(event) {
+  StartOptions(
+    name: Option(Name(event)),
+    timeout: Timeout,
+    hibernate_after: Timeout,
+    debug: List(DebugFlag),
+    spawn_options: List(SpawnOption),
+  )
+}
+
+/// Data returned when a manager is started with `start_monitor`.
+pub type MonitoredManager(event) {
+  MonitoredManager(manager: Manager(event), monitor: Monitor)
 }
 
 /// Errors that can occur when adding a handler.
 pub type AddError {
-  HandlerAlreadyExists
-  InitFailed(String)
+  /// A handler with the same identity is already registered. The field
+  /// carries the `HandlerRef` that caused the collision.
+  HandlerAlreadyExists(handler_ref: HandlerRef)
+  /// The handler's initialisation failed. `reason` is a human-readable
+  /// string produced from the raw Erlang error term.
+  InitFailed(reason: String)
 }
 
 /// Errors that can occur when removing a handler.
 pub type RemoveError {
-  HandlerNotFound
-  RemoveFailed(String)
+  /// No handler with the given ref is currently registered. The field
+  /// carries the `HandlerRef` the caller supplied.
+  HandlerNotFound(handler_ref: HandlerRef)
+  /// Removal failed for another reason.
+  RemoveFailed(reason: String)
 }
 
 /// A builder for configuring a handler before registering it with a manager.
@@ -87,14 +160,15 @@ pub opaque type Handler(state, event) {
 /// An opaque reference to a specific registered handler instance.
 ///
 /// Values of this type are only ever produced by `add_handler` or
-/// `add_sup_handler`. Pass them to `remove_handler` to unregister a specific
-/// handler, or compare them with values returned by `which_handlers`.
+/// `add_supervised_handler`. Pass them to `remove_handler` to unregister a
+/// specific handler, or compare them with values returned by `which_handlers`.
 ///
 pub type HandlerRef
 
 /// An opaque reference to a running event manager process.
 ///
-/// Values of this type are only ever produced by `start`. Pass them to
+/// Values of this type are produced by `start` (directly) and `start_monitor`
+/// (as the `manager` field of the returned `MonitoredManager`). Pass them to
 /// `notify`, `sync_notify`, `add_handler`, etc.
 ///
 pub type Manager(event)
@@ -137,8 +211,8 @@ pub fn new_handler(
 /// ## Example
 ///
 /// ```gleam
-/// event_manager.new_handler(conn, on_event)
-/// |> event_manager.on_terminate(fn(conn) { db.close(conn) })
+/// event_manager.new_handler(connection, on_event)
+/// |> event_manager.on_terminate(fn(connection) { db.close(connection) })
 /// ```
 ///
 pub fn on_terminate(
@@ -159,8 +233,8 @@ pub fn on_terminate(
 ///
 /// ```gleam
 /// event_manager.new_handler(connection, on_event)
-/// |> event_manager.on_format_status(fn(conn) {
-///   "Conn(id=" <> conn.id <> ")"
+/// |> event_manager.on_format_status(fn(connection) {
+///   "Conn(id=" <> connection.id <> ")"
 /// })
 /// ```
 ///
@@ -171,13 +245,87 @@ pub fn on_format_status(
   Handler(..handler, on_format_status: Some(formatter))
 }
 
+// ---------------------------------------------------------------------------
+// StartOptions builder
+// ---------------------------------------------------------------------------
+/// Build a fresh `StartOptions` with defaults: no registered name, `Infinity`
+/// for both `timeout` and `hibernate_after`, no debug flags, no spawn options.
+///
+pub fn new_start_options() -> StartOptions(event) {
+  StartOptions(
+    name: None,
+    timeout: Infinity,
+    hibernate_after: Infinity,
+    debug: [],
+    spawn_options: [],
+  )
+}
+
+/// Register the manager under a local name. Gives callers a
+/// `process.Name(event)` they can turn into a `Subject` or look up with
+/// `process.named/1`.
+///
+pub fn with_name(
+  options: StartOptions(event),
+  name: Name(event),
+) -> StartOptions(event) {
+  StartOptions(..options, name: Some(name))
+}
+
+/// Set the initialisation timeout. Passed through to gen_event as the
+/// `{timeout, _}` option.
+///
+pub fn with_timeout(
+  options: StartOptions(event),
+  timeout: Timeout,
+) -> StartOptions(event) {
+  StartOptions(..options, timeout: timeout)
+}
+
+/// Set the idle hibernation timeout. Passed through to gen_event as the
+/// `{hibernate_after, _}` option.
+///
+pub fn with_hibernate_after(
+  options: StartOptions(event),
+  timeout: Timeout,
+) -> StartOptions(event) {
+  StartOptions(..options, hibernate_after: timeout)
+}
+
+/// Set the sys debug flags for the manager.
+///
+pub fn with_debug(
+  options: StartOptions(event),
+  flags: List(DebugFlag),
+) -> StartOptions(event) {
+  StartOptions(..options, debug: flags)
+}
+
+/// Set the `erlang:spawn_opt/2` options forwarded to the manager process.
+///
+pub fn with_spawn_options(
+  options: StartOptions(event),
+  spawn_options: List(SpawnOption),
+) -> StartOptions(event) {
+  StartOptions(..options, spawn_options: spawn_options)
+}
+
+// ---------------------------------------------------------------------------
 // Manager lifecycle
+// ---------------------------------------------------------------------------
+
 /// Start an event manager process linked to the caller.
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let assert Ok(mgr) = event_manager.start()
+/// case event_manager.start() {
+///   Ok(manager) -> {
+///     // ... use manager ...
+///     event_manager.stop(manager)
+///   }
+///   Error(_) -> Nil
+/// }
 /// ```
 ///
 pub fn start() -> Result(Manager(event), StartError) {
@@ -186,6 +334,39 @@ pub fn start() -> Result(Manager(event), StartError) {
 
 @external(erlang, "event_manager_ffi", "do_start")
 fn do_start() -> Result(Manager(event), StartError)
+
+/// Start an event manager linked to the caller and atomically return a
+/// monitor for it.
+///
+/// Equivalent to calling `start()` followed by `process.monitor(manager_pid)`,
+/// but without the race window between the two calls. The returned
+/// `MonitoredManager` carries both the `Manager` and a `process.Monitor` you
+/// can select on. Since OTP 23.0.
+///
+/// ## Example
+///
+/// ```gleam
+/// case event_manager.start_monitor(event_manager.new_start_options()) {
+///   Ok(monitored) -> {
+///     let selector =
+///       process.new_selector()
+///       |> process.select_specific_monitor(monitored.monitor, fn(down) { down })
+///     // ... use monitored.manager, wait on `selector` for a Down message ...
+///   }
+///   Error(_) -> Nil
+/// }
+/// ```
+///
+pub fn start_monitor(
+  options: StartOptions(event),
+) -> Result(MonitoredManager(event), StartError) {
+  do_start_monitor(options)
+}
+
+@external(erlang, "event_manager_ffi", "do_start_monitor")
+fn do_start_monitor(
+  options: StartOptions(event),
+) -> Result(MonitoredManager(event), StartError)
 
 /// Stop the event manager, terminating it with reason `normal`.
 ///
@@ -201,7 +382,8 @@ fn do_stop(manager: Manager(event)) -> Nil
 
 /// Return the Pid of the event manager process.
 ///
-/// Useful for monitoring the manager with `process.monitor`.
+/// Useful for monitoring the manager with `process.monitor` when you did not
+/// start it via `start_monitor`.
 ///
 pub fn manager_pid(manager: Manager(event)) -> Pid {
   do_manager_pid(manager)
@@ -210,7 +392,10 @@ pub fn manager_pid(manager: Manager(event)) -> Pid {
 @external(erlang, "event_manager_ffi", "do_manager_pid")
 fn do_manager_pid(manager: Manager(event)) -> Pid
 
+// ---------------------------------------------------------------------------
 // Handler management
+// ---------------------------------------------------------------------------
+
 /// Register an unsupervised handler with the event manager.
 ///
 /// Returns `Ok(HandlerRef)` on success. The returned ref uniquely identifies
@@ -222,7 +407,10 @@ fn do_manager_pid(manager: Manager(event)) -> Pid
 /// ## Example
 ///
 /// ```gleam
-/// let assert Ok(ref) = event_manager.add_handler(mgr, my_handler)
+/// case event_manager.add_handler(manager, my_handler) {
+///   Ok(handler_ref) -> // use handler_ref later with remove_handler
+///   Error(_) -> Nil
+/// }
 /// ```
 ///
 pub fn add_handler(
@@ -242,15 +430,15 @@ fn do_add_handler(
 ///
 /// Like `add_handler`, but links the handler to the calling process. If the
 /// handler is removed for any reason other than a normal `remove_handler` call
-/// (e.g. it crashes or returns `Remove`), the calling process receives a
-/// message of the form:
+/// (e.g. it crashes or returns `Remove`), the calling process receives an
+/// Erlang message shaped like:
 ///
 /// ```
 /// {gen_event_EXIT, HandlerRef, Reason}
 /// ```
 ///
-/// You can receive this message using `process.selecting_anything` with a
-/// `gleam/dynamic` decoder.
+/// Receive it via `gleam/erlang/process` selectors — `process.select_other` is
+/// the catch-all hook you can use to observe raw Erlang messages.
 ///
 pub fn add_supervised_handler(
   manager: Manager(event),
@@ -271,15 +459,15 @@ fn do_add_supervised_handler(
 ///
 pub fn remove_handler(
   manager: Manager(event),
-  ref: HandlerRef,
+  handler_ref: HandlerRef,
 ) -> Result(Nil, RemoveError) {
-  do_remove_handler(manager, ref)
+  do_remove_handler(manager, handler_ref)
 }
 
 @external(erlang, "event_manager_ffi", "do_remove_handler")
 fn do_remove_handler(
   manager: Manager(event),
-  ref: HandlerRef,
+  handler_ref: HandlerRef,
 ) -> Result(Nil, RemoveError)
 
 /// Return the list of `HandlerRef`s for all currently registered handlers.
@@ -291,7 +479,10 @@ pub fn which_handlers(manager: Manager(event)) -> List(HandlerRef) {
 @external(erlang, "event_manager_ffi", "do_which_handlers")
 fn do_which_handlers(manager: Manager(event)) -> List(HandlerRef)
 
+// ---------------------------------------------------------------------------
 // Notifications
+// ---------------------------------------------------------------------------
+
 /// Asynchronously broadcast an event to all registered handlers.
 ///
 /// Returns immediately without waiting for handlers to finish processing.

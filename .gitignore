@@ -21,3 +21,6 @@ result
 # lockfiles drift every time the root version bumps and provide no
 # reproducibility value. Let each build regenerate them fresh.
 examples/*/manifest.toml
+
+# Extra
+.env
