@@ -48,7 +48,7 @@ gleam add eparch
 
 ### Usage
 
-See the [Quick Start guide](https://hexdocs.pm/eparch/quick_start.html) for full walkthroughs, or run some of the example projects that live in the [`examples/`](https://hexdocs.pm/eparch/readme.html) directory.
+See the [Quick Start guide](https://hexdocs.pm/eparch/docs/quick_start.html) for full walkthroughs, or run some of the example projects that live in the [`examples/`](https://hexdocs.pm/eparch/examples/readme.html) directory.
 
 ## Development
 

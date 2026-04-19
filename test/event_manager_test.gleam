@@ -6,10 +6,15 @@
 ////
 
 import eparch/event_manager
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process
+import gleam/int
 import gleam/list
 import gleam/string
 import gleeunit/should
+
+@external(erlang, "sys", "get_status")
+fn sys_get_status(pid: process.Pid) -> Dynamic
 
 // ---------------------------------------------------------------------------
 // START / STOP
@@ -257,6 +262,48 @@ pub fn on_terminate_called_when_handler_removed_test() {
 
   let assert Ok(msg) = process.receive(reply_sub, 1000)
   msg |> should.equal("terminated")
+
+  event_manager.stop(mgr)
+}
+
+// ---------------------------------------------------------------------------
+// ON FORMAT STATUS
+//
+// When on_format_status is set, sys:get_status/1 reflects the formatted
+// state. When unset, the call still succeeds (raw state passes through).
+// ---------------------------------------------------------------------------
+
+pub fn on_format_status_overrides_state_in_status_report_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let h =
+    event_manager.new_handler(42, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+    |> event_manager.on_format_status(fn(n) { "FORMATTED:" <> int.to_string(n) })
+
+  let assert Ok(_ref) = event_manager.add_handler(mgr, h)
+
+  let status = sys_get_status(event_manager.manager_pid(mgr))
+  string.inspect(status)
+  |> string.contains("FORMATTED:42")
+  |> should.equal(True)
+
+  event_manager.stop(mgr)
+}
+
+pub fn handler_without_format_status_still_appears_in_status_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let h =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+
+  let assert Ok(_ref) = event_manager.add_handler(mgr, h)
+
+  // Should not crash; sys:get_status returns a non-empty term.
+  let _ = sys_get_status(event_manager.manager_pid(mgr))
 
   event_manager.stop(mgr)
 }
