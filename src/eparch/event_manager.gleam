@@ -39,10 +39,6 @@
 import gleam/erlang/process.{type Pid}
 import gleam/option.{type Option, None, Some}
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// The result of a handler processing an event.
 ///
 /// Return `Continue(new_state)` to keep the handler alive with updated state,
@@ -77,13 +73,14 @@ pub type RemoveError {
 /// A builder for configuring a handler before registering it with a manager.
 ///
 /// Create one with `new_handler/2` and optionally extend it with
-/// `on_terminate/2`.
+/// `on_terminate/2` and `on_format_status/2`.
 ///
 pub opaque type Handler(state, event) {
   Handler(
     init_state: state,
     on_event: fn(event, state) -> EventStep(state),
     on_terminate: Option(fn(state) -> Nil),
+    on_format_status: Option(fn(state) -> String),
   )
 }
 
@@ -126,7 +123,12 @@ pub fn new_handler(
   initial_state initial_state: state,
   on_event handler: fn(event, state) -> EventStep(state),
 ) -> Handler(state, event) {
-  Handler(init_state: initial_state, on_event: handler, on_terminate: None)
+  Handler(
+    init_state: initial_state,
+    on_event: handler,
+    on_terminate: None,
+    on_format_status: None,
+  )
 }
 
 /// Attach a cleanup function called when the handler is removed or the manager
@@ -144,6 +146,29 @@ pub fn on_terminate(
   cleanup: fn(state) -> Nil,
 ) -> Handler(state, event) {
   Handler(..handler, on_terminate: Some(cleanup))
+}
+
+/// Provide a function to format this handler's state for OTP status reports.
+///
+/// When set, the returned string is used in place of the raw state in
+/// `sys:get_status/1` output and SASL crash reports. Useful for hiding
+/// secrets, summarising large data structures, or presenting a domain-friendly
+/// view. Since OTP 25.0.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.new_handler(connection, on_event)
+/// |> event_manager.on_format_status(fn(conn) {
+///   "Conn(id=" <> conn.id <> ")"
+/// })
+/// ```
+///
+pub fn on_format_status(
+  handler: Handler(state, event),
+  formatter: fn(state) -> String,
+) -> Handler(state, event) {
+  Handler(..handler, on_format_status: Some(formatter))
 }
 
 // Manager lifecycle

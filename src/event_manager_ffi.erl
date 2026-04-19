@@ -37,7 +37,8 @@ every installed instance distinguishable.
     handle_info/2,
     handle_call/2,
     terminate/2,
-    code_change/3
+    code_change/3,
+    format_status/1
 ]).
 
 %%%===================================================================
@@ -51,7 +52,9 @@ every installed instance distinguishable.
     % fn(event, state) -> EventStep
     on_event,
     % none | {some, fn(state) -> nil}
-    on_terminate
+    on_terminate,
+    % none | {some, fn(state) -> binary()}
+    on_format_status
 }).
 
 %%%===================================================================
@@ -187,19 +190,20 @@ do_sync_notify(Pid, Event) ->
 Initialise a handler instance from the Gleam Handler builder record.
 
 The Gleam `Handler(state, event)` opaque type is represented at the Erlang
-level as a 4-tuple:
+level as a 5-tuple:
 
-    {handler, InitState, OnEvent, OnTerminate}
+    {handler, InitState, OnEvent, OnTerminate, OnFormatStatus}
 
 We unpack it here and store the fields alongside the unique Ref in a
 `#gleam_handler{}` record.
 """.
-init({{handler, InitState, OnEvent, OnTerminate}, Ref}) ->
+init({{handler, InitState, OnEvent, OnTerminate, OnFormatStatus}, Ref}) ->
     State = #gleam_handler{
         ref = Ref,
         gleam_state = InitState,
         on_event = OnEvent,
-        on_terminate = OnTerminate
+        on_terminate = OnTerminate,
+        on_format_status = OnFormatStatus
     },
     {ok, State}.
 
@@ -261,3 +265,27 @@ Hot-code upgrade support (pass-through).
 """.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+-doc """
+Format the handler state for `sys:get_status/1` and SASL crash reports.
+
+OTP 25+ semantics: receives a status map containing `state` (the handler's
+internal record) plus optional `message`, `reason`, and `log` keys. Returns
+the same map, optionally with `state` replaced by the user-supplied
+formatter's output. When no `on_format_status` was registered, the map is
+returned unchanged.
+""".
+format_status(
+    #{
+        state := #gleam_handler{
+            on_format_status = OnFormatStatus,
+            gleam_state = GleamState
+        }
+    } = Status
+) ->
+    case OnFormatStatus of
+        none ->
+            Status;
+        {some, Fun} ->
+            Status#{state => Fun(GleamState)}
+    end.
