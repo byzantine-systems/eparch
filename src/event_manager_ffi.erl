@@ -20,6 +20,7 @@ every installed instance distinguishable.
 %% Public API (called from Gleam via @external)
 -export([
     do_start/0,
+    do_start_monitor/1,
     do_stop/1,
     do_manager_pid/1,
     do_add_handler/2,
@@ -72,11 +73,86 @@ do_start() ->
     case gen_event:start_link() of
         {ok, Pid} ->
             {ok, Pid};
-        {error, {already_started, _}} ->
-            {error, already_started};
+        {error, {already_started, Pid}} ->
+            {error, {already_started, Pid}};
         {error, Reason} ->
-            {error, {start_failed, term_to_binary(Reason)}}
+            {error, {start_failed, format_reason(Reason)}}
     end.
+
+-doc """
+Start a gen_event manager with an atomic monitor (OTP 23.0+).
+
+The Gleam side passes an opaque `StartOptions` record, encoded at the Erlang
+level as:
+
+    {start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}
+
+`NameOpt` is `none | {some, Name}`; `Timeout`/`HibernateAfter` are
+`infinity | {milliseconds, Ms}`; the two list fields are empty when unused.
+Returns the `MonitoredManager(manager, monitor)` 3-tuple the Gleam compiler
+expects.
+""".
+do_start_monitor({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}) ->
+    ErlangOpts = build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts),
+    Result =
+        case NameOpt of
+            none ->
+                gen_event:start_monitor(ErlangOpts);
+            {some, Name} ->
+                gen_event:start_monitor({local, Name}, ErlangOpts)
+        end,
+    case Result of
+        {ok, {Pid, MonitorRef}} ->
+            {ok, {monitored_manager, Pid, MonitorRef}};
+        {error, {already_started, Pid}} ->
+            {error, {already_started, Pid}};
+        {error, Reason} ->
+            {error, {start_failed, format_reason(Reason)}}
+    end.
+
+build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts) ->
+    [{timeout, timeout_to_erlang(Timeout)}, {hibernate_after, timeout_to_erlang(HibernateAfter)}] ++
+        case DebugFlags of
+            [] -> [];
+            _ -> [{debug, [debug_to_erlang(F) || F <- DebugFlags]}]
+        end ++
+        case SpawnOpts of
+            [] -> [];
+            _ -> [{spawn_opt, [spawn_opt_to_erlang(O) || O <- SpawnOpts]}]
+        end.
+
+timeout_to_erlang(infinity) -> infinity;
+timeout_to_erlang({milliseconds, Ms}) -> Ms.
+
+debug_to_erlang(debug_trace) -> trace;
+debug_to_erlang(debug_log) -> log;
+debug_to_erlang(debug_statistics) -> statistics;
+debug_to_erlang({debug_log_to_file, FileName}) -> {log_to_file, FileName}.
+
+spawn_opt_to_erlang({spawn_priority, Level}) ->
+    {priority, priority_to_erlang(Level)};
+spawn_opt_to_erlang({spawn_fullsweep_after, N}) ->
+    {fullsweep_after, N};
+spawn_opt_to_erlang({spawn_min_heap_size, N}) ->
+    {min_heap_size, N};
+spawn_opt_to_erlang({spawn_min_bin_vheap_size, N}) ->
+    {min_bin_vheap_size, N};
+spawn_opt_to_erlang({spawn_max_heap_size, N}) ->
+    {max_heap_size, N};
+spawn_opt_to_erlang({spawn_message_queue_data, Mode}) ->
+    {message_queue_data, mq_mode_to_erlang(Mode)}.
+
+%% Render an Erlang error term as a human-readable Gleam string.
+format_reason(Reason) ->
+    unicode:characters_to_binary(io_lib:format("~p", [Reason])).
+
+priority_to_erlang(priority_low) -> low;
+priority_to_erlang(priority_normal) -> normal;
+priority_to_erlang(priority_high) -> high;
+priority_to_erlang(priority_max) -> max.
+
+mq_mode_to_erlang(on_heap) -> on_heap;
+mq_mode_to_erlang(off_heap) -> off_heap.
 
 -doc """
 Stop the event manager, terminating it with reason `normal`.
@@ -109,11 +185,11 @@ do_add_handler(Pid, GleamHandler) ->
         ok ->
             {ok, HandlerId};
         {'EXIT', Reason} ->
-            {error, {init_failed, erlang:term_to_binary(Reason)}};
+            {error, {init_failed, format_reason(Reason)}};
         {error, already_started} ->
-            {error, handler_already_exists};
+            {error, {handler_already_exists, HandlerId}};
         {error, Reason} ->
-            {error, {init_failed, erlang:term_to_binary(Reason)}}
+            {error, {init_failed, format_reason(Reason)}}
     end.
 
 -doc """
@@ -130,11 +206,11 @@ do_add_sup_handler(Pid, GleamHandler) ->
         ok ->
             {ok, HandlerId};
         {'EXIT', Reason} ->
-            {error, {init_failed, erlang:term_to_binary(Reason)}};
+            {error, {init_failed, format_reason(Reason)}};
         {error, already_started} ->
-            {error, handler_already_exists};
+            {error, {handler_already_exists, HandlerId}};
         {error, Reason} ->
-            {error, {init_failed, erlang:term_to_binary(Reason)}}
+            {error, {init_failed, format_reason(Reason)}}
     end.
 
 -doc """
@@ -145,11 +221,13 @@ with reason `{stop, remove_handler}`.
 """.
 do_remove_handler(Pid, HandlerId) ->
     case gen_event:delete_handler(Pid, HandlerId, remove_handler) of
-        ok ->
-            {ok, nil};
         {error, module_not_found} ->
-            {error, handler_not_found};
-        _ ->
+            {error, {handler_not_found, HandlerId}};
+        {'EXIT', Reason} ->
+            {error, {remove_failed, format_reason(Reason)}};
+        _TerminateResult ->
+            %% Any other value is what the handler's terminate/2 returned
+            %% (which we treat as a successful removal).
             {ok, nil}
     end.
 
