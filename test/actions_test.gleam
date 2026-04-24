@@ -526,9 +526,19 @@ pub fn send_request_to_collection_delivers_both_replies_test() {
   let coll: state_machine.ReqIdCollection(String, Int) =
     state_machine.reqids_new()
   let coll =
-    state_machine.send_request_to_collection(machine.data, GetCounter, "a", coll)
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "a",
+      coll,
+    )
   let coll =
-    state_machine.send_request_to_collection(machine.data, GetCounter, "b", coll)
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "b",
+      coll,
+    )
 
   let assert state_machine.GotReply(v1, _l1, coll) =
     state_machine.receive_response_collection(coll, 1000, True)
@@ -548,9 +558,19 @@ pub fn reqids_to_list_contains_all_entries_test() {
   let coll: state_machine.ReqIdCollection(String, Int) =
     state_machine.reqids_new()
   let coll =
-    state_machine.send_request_to_collection(machine.data, GetCounter, "x", coll)
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "x",
+      coll,
+    )
   let coll =
-    state_machine.send_request_to_collection(machine.data, GetCounter, "y", coll)
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "y",
+      coll,
+    )
 
   let entries = state_machine.reqids_to_list(coll)
   list.length(entries) |> should.equal(2)
