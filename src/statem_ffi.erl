@@ -8,6 +8,16 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 
 %% Public API
 -export([do_start/7, cast/2]).
+-export([
+    reqids_new/0,
+    reqids_add/3,
+    reqids_size/1,
+    reqids_to_list/1,
+    send_request/2,
+    send_request_to_collection/4,
+    receive_response/2,
+    receive_response_collection/3
+]).
 
 %% gen_statem callbacks
 -export([
@@ -349,6 +359,80 @@ cast(Subject, Msg) ->
         end,
     gen_statem:cast(Pid, Msg),
     nil.
+
+%%%===================================================================
+%%% reqids API — OTP 25.0+
+%%%===================================================================
+
+-doc "Creates a new empty request-id collection.".
+reqids_new() ->
+    gen_statem:reqids_new().
+
+-doc "Adds a request id to a collection under the given label.".
+reqids_add(ReqId, Label, Collection) ->
+    gen_statem:reqids_add(ReqId, Label, Collection).
+
+-doc "Returns the number of request ids in the collection.".
+reqids_size(Collection) ->
+    gen_statem:reqids_size(Collection).
+
+-doc "Converts the collection to a list of {ReqId, Label} pairs.".
+reqids_to_list(Collection) ->
+    gen_statem:reqids_to_list(Collection).
+
+-doc """
+Sends an asynchronous call request to a gen_statem process and returns a
+request id. The server receives a `Call(from, msg)` event and must respond
+with a `Reply(from, value)` action. Use `receive_response/2` to collect the
+reply when ready.
+""".
+send_request({subject, Pid, _Tag}, Msg) ->
+    gen_statem:send_request(Pid, Msg);
+send_request({named_subject, Name}, Msg) ->
+    case erlang:whereis(Name) of
+        Pid when is_pid(Pid) -> gen_statem:send_request(Pid, Msg);
+        undefined -> error({noproc, Name})
+    end.
+
+-doc """
+Like `send_request/2` but also adds the resulting request id (under `Label`)
+to `Collection`, returning the updated collection.
+""".
+send_request_to_collection({subject, Pid, _Tag}, Msg, Label, Collection) ->
+    gen_statem:send_request(Pid, Msg, Label, Collection);
+send_request_to_collection({named_subject, Name}, Msg, Label, Collection) ->
+    case erlang:whereis(Name) of
+        Pid when is_pid(Pid) -> gen_statem:send_request(Pid, Msg, Label, Collection);
+        undefined -> error({noproc, Name})
+    end.
+
+-doc """
+Waits up to `Timeout` milliseconds for the reply to a single `ReqId`.
+Returns `{ok, Reply}` on success or `{error, Reason}` on failure/timeout.
+""".
+receive_response(ReqId, Timeout) ->
+    case gen_statem:receive_response(ReqId, Timeout) of
+        {reply, Reply} -> {ok, Reply};
+        {error, {Reason, _ServerRef}} -> {error, Reason}
+    end.
+
+-doc """
+Waits up to `Timeout` milliseconds for any reply in `Collection`.
+When `Delete` is `true` the matched request is removed from the returned
+collection. Maps to Gleam's `CollectionResponse` constructors:
+  `{got_reply, Reply, Label, NewColl}`
+  `{request_failed, Reason, Label, NewColl}`
+  `no_requests`
+""".
+receive_response_collection(Collection, Timeout, Delete) ->
+    case gen_statem:receive_response(Collection, Timeout, Delete) of
+        {{reply, Reply}, Label, NewColl} ->
+            {got_reply, Reply, Label, NewColl};
+        {{error, {Reason, _ServerRef}}, Label, NewColl} ->
+            {request_failed, Reason, Label, NewColl};
+        no_request ->
+            no_requests
+    end.
 
 -doc """
 Converts a Gleam ExitReason to an Erlang exit reason term.
