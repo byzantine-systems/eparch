@@ -7,7 +7,7 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 -behaviour(gen_statem).
 
 %% Public API
--export([do_start/7, cast/2]).
+-export([do_start/8, cast/2]).
 -export([
     reqids_new/0,
     reqids_add/3,
@@ -25,7 +25,8 @@ gen_statem behavior callbacks and Gleam's type-safe API.
     callback_mode/0,
     handle_event/4,
     terminate/3,
-    code_change/4
+    code_change/4,
+    format_status/1
 ]).
 
 %%%===================================================================
@@ -48,7 +49,9 @@ gen_statem behavior callbacks and Gleam's type-safe API.
     % - named: atom (the registered name)
     subject_tag,
     % none | {some, fn(data) -> data}
-    on_code_change
+    on_code_change,
+    % none | {some, fn(Status) -> Status}
+    on_format_status
 }).
 
 %%%===================================================================
@@ -59,7 +62,9 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 Start a `gen_statem` process linked to the caller and return the Subject
 needed to send messages to it
 """.
--spec do_start(InitialState, InitialData, Handler, StateEnter, TimeOut, Name, OnCodeChange) ->
+-spec do_start(
+    InitialState, InitialData, Handler, StateEnter, TimeOut, Name, OnCodeChange, OnFormatStatus
+) ->
     Result
 when
     InitialState :: any(),
@@ -69,8 +74,11 @@ when
     TimeOut :: timeout(),
     Name :: process_name_option(),
     OnCodeChange :: any(),
+    OnFormatStatus :: any(),
     Result :: any().
-do_start(InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeChange) ->
+do_start(
+    InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeChange, OnFormatStatus
+) ->
     %% Ack channel: a unique reference the child process will use to
     %% send us the Subject it creates in init/1.
     AckTag = make_ref(),
@@ -78,7 +86,7 @@ do_start(InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeCh
 
     InitArgs =
         {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name,
-            OnCodeChange},
+            OnCodeChange, OnFormatStatus},
 
     StartResult =
         case Name of
@@ -125,7 +133,8 @@ Creates the Subject for this process and sends it back to the parent
 through the ack channel before returning to gen_statem.
 """.
 init(
-    {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name, OnCodeChange}
+    {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name, OnCodeChange,
+        OnFormatStatus}
 ) ->
     %% Build the Subject and determine the tag used for message unwrapping.
     {Subject, SubjectTag} =
@@ -150,7 +159,8 @@ init(
         gleam_handler = Handler,
         state_enter = StateEnter,
         subject_tag = SubjectTag,
-        on_code_change = OnCodeChange
+        on_code_change = OnCodeChange,
+        on_format_status = OnFormatStatus
     },
 
     {ok, InitialState, GleamStatem}.
@@ -223,6 +233,148 @@ code_change(
             {some, F} -> F(Data)
         end,
     {ok, State, GleamStatem#gleam_statem{gleam_data = NewData}}.
+
+-doc """
+Format the state/data for `sys:get_status/1` and SASL crash reports.
+
+OTP 25+ semantics: receives a status map containing `state`, `data`, and an
+optional subset of `reason`, `queue`, `postponed`, `timeouts`, `log`. The
+internal `#gleam_statem{}` lives under `data`; we extract the user's
+`gleam_data` before calling the Gleam-side formatter, and write the
+formatter's returned value back into the map's `data` key unwrapped (the
+result is purely for display, never becomes the live process data).
+
+Keys that were absent from the input map are not introduced in the output,
+matching OTP's contract that `NewStatus` has the same elements as `Status`.
+""".
+format_status(
+    #{
+        state := State,
+        data := #gleam_statem{
+            on_format_status = OnFormatStatus,
+            gleam_data = GleamData,
+            subject_tag = SubjectTag
+        }
+    } = Status
+) ->
+    case OnFormatStatus of
+        none ->
+            Status;
+        {some, Fun} ->
+            Reason = classify_reason_opt(Status),
+            Queue = classify_queue_entries(maps:get(queue, Status, []), SubjectTag),
+            Postponed = classify_queue_entries(maps:get(postponed, Status, []), SubjectTag),
+            Timeouts = classify_timeouts(maps:get(timeouts, Status, [])),
+            Log = maps:get(log, Status, []),
+            %% Gleam Status record on the Erlang side:
+            %% {status, state, data, reason, queue, postponed, timeouts, log}
+            GleamStatus =
+                {status, State, GleamData, Reason, Queue, Postponed, Timeouts, Log},
+            {status, NewState, NewData, NewReason, NewQueue, NewPostponed, NewTimeouts, NewLog} =
+                Fun(GleamStatus),
+            %% maps:map/2 walks only the keys already in Status, so optional
+            %% keys that were absent in the input stay absent in the output,
+            %% honouring OTP's "NewStatus has the same elements as Status"
+            %% contract. The final clause passes through any future keys OTP
+            %% adds to the status map.
+            maps:map(
+                fun
+                    (state, _) ->
+                        NewState;
+                    (data, _) ->
+                        NewData;
+                    (reason, OrigReason) ->
+                        case NewReason of
+                            none -> OrigReason;
+                            {some, R} -> unclassify_reason(R)
+                        end;
+                    (queue, _) ->
+                        [unclassify_queue_entry(E) || E <- NewQueue];
+                    (postponed, _) ->
+                        [unclassify_queue_entry(E) || E <- NewPostponed];
+                    (timeouts, _) ->
+                        [unclassify_timeout(T) || T <- NewTimeouts];
+                    (log, _) ->
+                        NewLog;
+                    (_, V) ->
+                        V
+                end,
+                Status
+            )
+    end.
+
+%%%===================================================================
+%%% format_status: Erlang <-> Gleam conversions
+%%%
+%%% All classify_* converters aim for typed Gleam variants; any shape
+%%% we cannot confidently map is wrapped in an *_other variant carrying
+%%% the raw term, so format_status never crashes on unexpected input.
+%%%===================================================================
+
+classify_reason_opt(Status) ->
+    case maps:find(reason, Status) of
+        {ok, R} -> {some, classify_reason(R)};
+        error -> none
+    end.
+
+%% Gleam process.ExitReason is {normal} | {killed} | {abnormal, Term}.
+%% Wrap recognised shapes as Exit(...); everything else as RawReason(term).
+classify_reason(normal) -> {exit, {normal}};
+classify_reason(killed) -> {exit, {killed}};
+classify_reason({abnormal, T}) -> {exit, {abnormal, T}};
+classify_reason(Other) -> {raw_reason, Other}.
+
+unclassify_reason({exit, {normal}}) -> normal;
+unclassify_reason({exit, {killed}}) -> killed;
+unclassify_reason({exit, {abnormal, T}}) -> {abnormal, T};
+unclassify_reason({raw_reason, Term}) -> Term.
+
+classify_queue_entries(Entries, SubjectTag) ->
+    [classify_queue_entry(E, SubjectTag) || E <- Entries].
+
+classify_queue_entry({{call, From}, Content}, _) ->
+    {queued_call, From, Content};
+classify_queue_entry({cast, Content}, _) ->
+    {queued_cast, Content};
+classify_queue_entry({info, Content}, SubjectTag) ->
+    %% Match handle_event/4's behaviour: unwrap messages sent via the Subject,
+    %% pass through raw Erlang terms unchanged.
+    Msg =
+        case Content of
+            {SubjectTag, M} -> M;
+            _ -> Content
+        end,
+    {queued_info, Msg};
+classify_queue_entry({internal, Content}, _) ->
+    {queued_internal, Content};
+classify_queue_entry({state_timeout, Content}, _) ->
+    {queued_state_timeout, Content};
+classify_queue_entry({{timeout, Name}, Content}, _) when is_binary(Name) ->
+    {queued_generic_timeout, Name, Content};
+classify_queue_entry(Other, _) ->
+    {queued_other, Other}.
+
+unclassify_queue_entry({queued_call, From, Content}) -> {{call, From}, Content};
+unclassify_queue_entry({queued_cast, Content}) -> {cast, Content};
+unclassify_queue_entry({queued_info, Msg}) -> {info, Msg};
+unclassify_queue_entry({queued_internal, Content}) -> {internal, Content};
+unclassify_queue_entry({queued_state_timeout, Content}) -> {state_timeout, Content};
+unclassify_queue_entry({queued_generic_timeout, Name, Content}) -> {{timeout, Name}, Content};
+unclassify_queue_entry({queued_other, Raw}) -> Raw.
+
+classify_timeouts(Entries) ->
+    [classify_timeout(E) || E <- Entries].
+
+classify_timeout({state_timeout, Content}) ->
+    {active_state_timeout, Content};
+classify_timeout({{timeout, Name}, Content}) when is_binary(Name) ->
+    {active_generic_timeout, Name, Content};
+classify_timeout(Other) ->
+    {active_other_timeout, Other}.
+
+unclassify_timeout({active_state_timeout, Content}) -> {state_timeout, Content};
+unclassify_timeout({active_generic_timeout, Name, Content}) -> {{timeout, Name}, Content};
+unclassify_timeout({active_other_timeout, Raw}) -> Raw.
 
 %%%===================================================================
 %%% Event conversion from Erlang to Gleam
@@ -408,28 +560,39 @@ send_request_to_collection({named_subject, Name}, Msg, Label, Collection) ->
 
 -doc """
 Waits up to `Timeout` milliseconds for the reply to a single `ReqId`.
-Returns `{ok, Reply}` on success or `{error, Reason}` on failure/timeout.
+Returns `{ok, Reply}` on success, `{error, receive_timeout}` on timeout,
+or `{error, {request_crashed, StopReason}}` if the server terminated.
 """.
 receive_response(ReqId, Timeout) ->
     case gen_statem:receive_response(ReqId, Timeout) of
-        {reply, Reply} -> {ok, Reply};
-        {error, {Reason, _ServerRef}} -> {error, Reason}
+        {reply, Reply} ->
+            {ok, Reply};
+        timeout ->
+            {error, receive_timeout};
+        {error, {Reason, _ServerRef}} ->
+            {error, {request_crashed, classify_reason(Reason)}}
     end.
 
 -doc """
 Waits up to `Timeout` milliseconds for any reply in `Collection`.
-When `Delete` is `true` the matched request is removed from the returned
-collection. Maps to Gleam's `CollectionResponse` constructors:
+`Handling` is the atom `delete` (remove the matched request from the
+returned collection) or `keep`. Maps to Gleam's `CollectionResponse`
+constructors:
   `{got_reply, Reply, Label, NewColl}`
-  `{request_failed, Reason, Label, NewColl}`
+  `{request_failed, StopReason, Label, NewColl}`
   `no_requests`
 """.
-receive_response_collection(Collection, Timeout, Delete) ->
+receive_response_collection(Collection, Timeout, Handling) ->
+    Delete =
+        case Handling of
+            delete -> true;
+            keep -> false
+        end,
     case gen_statem:receive_response(Collection, Timeout, Delete) of
         {{reply, Reply}, Label, NewColl} ->
             {got_reply, Reply, Label, NewColl};
         {{error, {Reason, _ServerRef}}, Label, NewColl} ->
-            {request_failed, Reason, Label, NewColl};
+            {request_failed, classify_reason(Reason), Label, NewColl};
         no_request ->
             no_requests
     end.

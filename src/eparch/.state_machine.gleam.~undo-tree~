@@ -1,9 +1,0 @@
-(undo-tree-save-format-version . 1)
-"940e9f50ed33a7d1859837fd0f14d6f7e4323b24"
-[nil nil nil nil (27094 57571 600841 504000) 0 nil]
-([nil nil ((975 . 980) (" " . -975) (undo-tree-id22 . -1) (undo-tree-id23 . -1) (undo-tree-id24 . -1) (undo-tree-id25 . -1) (undo-tree-id26 . -1) (undo-tree-id27 . -1) (undo-tree-id28 . -1) ("i" . -976) (undo-tree-id29 . -1) (undo-tree-id30 . -1) (undo-tree-id31 . -1) (undo-tree-id32 . -1) (undo-tree-id33 . -1) ("n" . -977) (undo-tree-id34 . -1) (undo-tree-id35 . -1) (undo-tree-id36 . -1) 978 (976 . 978) (" " . -976) (undo-tree-id37 . -1) 977 (975 . 977) (970 . 975) ("r" . -970) (undo-tree-id38 . -1) 971 (966 . 971) (965 . 966) (961 . 965) ("ty" . -961) (undo-tree-id39 . -2) (undo-tree-id40 . -2) (undo-tree-id41 . -2) 963 (961 . 963) ("t" . -961) (undo-tree-id42 . -1) (undo-tree-id43 . -1) (undo-tree-id44 . -1) ("y" . -962) (undo-tree-id45 . -1) (undo-tree-id46 . -1) (undo-tree-id47 . -1) ("p" . -963) (undo-tree-id48 . -1) ("o" . -964) (undo-tree-id49 . -1) ("e" . -965) (undo-tree-id50 . -1) 966 (963 . 966) ("e" . -963) (undo-tree-id51 . -1) ("p" . -964) (undo-tree-id52 . -1) 965 (961 . 965) (960 . 961) (959 . 960) (t 27094 57543 959056 123000) 958) nil (27094 57571 600840 101000) 0 nil])
-([nil nil (("type StateMachine {
-" . 961) (undo-tree-id2 . -19) (undo-tree-id3 . -20) (undo-tree-id4 . -20) (undo-tree-id5 . -20) (undo-tree-id6 . -20) (undo-tree-id7 . -20) (undo-tree-id8 . -20) (undo-tree-id9 . -14) (undo-tree-id10 . -14) (undo-tree-id11 . -18) (undo-tree-id12 . -14) (undo-tree-id13 . -14) (undo-tree-id14 . -14) (undo-tree-id15 . 1) (undo-tree-id16 . -18) (undo-tree-id17 . -18) (undo-tree-id18 . -18) (undo-tree-id19 . -18) (undo-tree-id20 . -18) (undo-tree-id21 . -20) 979) nil (27094 57571 600827 888000) 0 nil])
-([nil current (("
-" . 961) (undo-tree-id0 . 1) (undo-tree-id1 . -1)) nil (27094 57571 600812 899000) 0 nil])
-nil

@@ -7,10 +7,16 @@
 ////
 
 import eparch/state_machine
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/process
+import gleam/int
 import gleam/list
+import gleam/string
 import gleeunit/should
+
+@external(erlang, "sys", "get_status")
+fn sys_get_status(pid: process.Pid) -> Dynamic
 
 // STOP
 type StopState {
@@ -461,9 +467,9 @@ pub fn send_request_returns_reply_test() {
     |> state_machine.on_event(reqid_handler)
     |> state_machine.start
 
-  let req: state_machine.ReqId(Int) =
+  let request: state_machine.RequestId(Int) =
     state_machine.send_request(machine.data, GetCounter)
-  let assert Ok(count) = state_machine.receive_response(req, 1000)
+  let assert Ok(count) = state_machine.receive_response(request, 1000)
   count |> should.equal(0)
 }
 
@@ -476,45 +482,53 @@ pub fn send_request_sees_latest_state_test() {
   process.send(machine.data, Increment)
   process.send(machine.data, Increment)
 
-  let req: state_machine.ReqId(Int) =
+  let request: state_machine.RequestId(Int) =
     state_machine.send_request(machine.data, GetCounter)
-  let assert Ok(count) = state_machine.receive_response(req, 1000)
+  let assert Ok(count) = state_machine.receive_response(request, 1000)
   count |> should.equal(2)
 }
 
-pub fn reqids_size_reflects_pending_requests_test() {
+pub fn request_ids_size_reflects_pending_requests_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
     |> state_machine.start
 
-  let coll: state_machine.ReqIdCollection(String, Int) =
-    state_machine.reqids_new()
-  state_machine.reqids_size(coll) |> should.equal(0)
+  let collection: state_machine.RequestIdCollection(String, Int) =
+    state_machine.request_ids_new()
+  state_machine.request_ids_size(collection) |> should.equal(0)
 
-  let coll =
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "first",
-      coll,
+      collection,
     )
-  state_machine.reqids_size(coll) |> should.equal(1)
+  state_machine.request_ids_size(collection) |> should.equal(1)
 
-  let coll =
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "second",
-      coll,
+      collection,
     )
-  state_machine.reqids_size(coll) |> should.equal(2)
+  state_machine.request_ids_size(collection) |> should.equal(2)
 
-  let assert state_machine.GotReply(_, _, coll) =
-    state_machine.receive_response_collection(coll, 1000, True)
-  let assert state_machine.GotReply(_, _, coll) =
-    state_machine.receive_response_collection(coll, 1000, True)
-  state_machine.reqids_size(coll) |> should.equal(0)
+  let assert state_machine.GotReply(_, _, collection) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
+  let assert state_machine.GotReply(_, _, collection) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
+  state_machine.request_ids_size(collection) |> should.equal(0)
 }
 
 pub fn send_request_to_collection_delivers_both_replies_test() {
@@ -523,79 +537,164 @@ pub fn send_request_to_collection_delivers_both_replies_test() {
     |> state_machine.on_event(reqid_handler)
     |> state_machine.start
 
-  let coll: state_machine.ReqIdCollection(String, Int) =
-    state_machine.reqids_new()
-  let coll =
+  let collection: state_machine.RequestIdCollection(String, Int) =
+    state_machine.request_ids_new()
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "a",
-      coll,
+      collection,
     )
-  let coll =
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "b",
-      coll,
+      collection,
     )
 
-  let assert state_machine.GotReply(v1, _l1, coll) =
-    state_machine.receive_response_collection(coll, 1000, True)
-  let assert state_machine.GotReply(v2, _l2, _) =
-    state_machine.receive_response_collection(coll, 1000, True)
+  let assert state_machine.GotReply(value1, _label1, collection) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
+  let assert state_machine.GotReply(value2, _label2, _) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
 
-  v1 |> should.equal(42)
-  v2 |> should.equal(42)
+  value1 |> should.equal(42)
+  value2 |> should.equal(42)
 }
 
-pub fn reqids_to_list_contains_all_entries_test() {
+pub fn request_ids_to_list_contains_all_entries_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
     |> state_machine.start
 
-  let coll: state_machine.ReqIdCollection(String, Int) =
-    state_machine.reqids_new()
-  let coll =
+  let collection: state_machine.RequestIdCollection(String, Int) =
+    state_machine.request_ids_new()
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "x",
-      coll,
+      collection,
     )
-  let coll =
+  let collection =
     state_machine.send_request_to_collection(
       machine.data,
       GetCounter,
       "y",
-      coll,
+      collection,
     )
 
-  let entries = state_machine.reqids_to_list(coll)
+  let entries = state_machine.request_ids_to_list(collection)
   list.length(entries) |> should.equal(2)
 
-  let assert state_machine.GotReply(_, _, coll) =
-    state_machine.receive_response_collection(coll, 1000, True)
+  let assert state_machine.GotReply(_, _, collection) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
   let assert state_machine.GotReply(_, _, _) =
-    state_machine.receive_response_collection(coll, 1000, True)
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
 }
 
-pub fn reqids_add_manually_adds_to_collection_test() {
+pub fn request_ids_add_manually_adds_to_collection_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 7)
     |> state_machine.on_event(reqid_handler)
     |> state_machine.start
 
-  let req: state_machine.ReqId(Int) =
+  let request: state_machine.RequestId(Int) =
     state_machine.send_request(machine.data, GetCounter)
-  let coll: state_machine.ReqIdCollection(String, Int) =
-    state_machine.reqids_new()
-  let coll = state_machine.reqids_add(req_id: req, label: "manual", to: coll)
-  state_machine.reqids_size(coll) |> should.equal(1)
+  let collection: state_machine.RequestIdCollection(String, Int) =
+    state_machine.request_ids_new()
+  let collection =
+    state_machine.request_ids_add(
+      request_id: request,
+      label: "manual",
+      to: collection,
+    )
+  state_machine.request_ids_size(collection) |> should.equal(1)
 
-  let assert state_machine.GotReply(val, label, _) =
-    state_machine.receive_response_collection(coll, 1000, True)
-  val |> should.equal(7)
+  let assert state_machine.GotReply(value, label, _) =
+    state_machine.receive_response_collection(
+      collection,
+      1000,
+      state_machine.Delete,
+    )
+  value |> should.equal(7)
   label |> should.equal("manual")
+}
+
+// ON FORMAT STATUS
+type FmtState {
+  FmtIdle
+  FmtReady
+}
+
+type FmtMsg {
+  FmtGoReady
+}
+
+type FmtData {
+  FmtSecret(value: Int)
+  FmtRedacted(label: String)
+}
+
+fn fmt_handler(
+  event: state_machine.Event(FmtState, FmtMsg, Nil),
+  _state: FmtState,
+  data: FmtData,
+) -> state_machine.Step(FmtState, FmtData, FmtMsg, Nil) {
+  case event {
+    state_machine.Info(FmtGoReady) ->
+      state_machine.next_state(FmtReady, data, [])
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn on_format_status_overrides_data_in_status_report_test() {
+  let assert Ok(machine) =
+    state_machine.new(
+      initial_state: FmtIdle,
+      initial_data: FmtSecret(value: 42),
+    )
+    |> state_machine.on_event(fmt_handler)
+    |> state_machine.on_format_status(fn(status) {
+      let label = case status.data {
+        FmtSecret(value: v) -> "FORMATTED:" <> int.to_string(v)
+        FmtRedacted(label: l) -> l
+      }
+      state_machine.Status(..status, data: FmtRedacted(label: label))
+    })
+    |> state_machine.start
+
+  let status = sys_get_status(machine.pid)
+  string.inspect(status)
+  |> string.contains("FORMATTED:42")
+  |> should.equal(True)
+}
+
+pub fn machine_without_format_status_still_appears_in_status_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: FmtIdle, initial_data: FmtSecret(value: 0))
+    |> state_machine.on_event(fmt_handler)
+    |> state_machine.start
+
+  // Should not crash; sys:get_status returns a non-empty term.
+  let _ = sys_get_status(machine.pid)
+  Nil
 }
