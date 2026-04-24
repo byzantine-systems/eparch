@@ -1,6 +1,6 @@
 ////
 //// Integration tests for gen_statem actions: Stop, Postpone, NextEvent,
-//// StateTimeout, GenericTimeout, and Cast.
+//// StateTimeout, GenericTimeout, Cast, and reqids (send_request).
 ////
 //// Each section has its own state/msg types, prefixed to avoid constructor
 //// name collisions across sections.
@@ -9,6 +9,7 @@
 import eparch/state_machine
 import gleam/erlang/atom
 import gleam/erlang/process
+import gleam/list
 import gleeunit/should
 
 // STOP
@@ -423,4 +424,158 @@ pub fn push_then_pop_callback_module_roundtrip_test() {
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("pong")
+}
+
+// REQIDS (send_request / OTP 25+)
+//
+// The server receives Call(from, msg) events and must reply with the
+// Reply(from, value) action. This is different from the Info-based pattern
+// used by state_machine.call / process.call.
+//
+
+type ReqState {
+  ReqRunning
+}
+
+type ReqMsg {
+  GetCounter
+  Increment
+}
+
+fn reqid_handler(
+  event: state_machine.Event(ReqState, ReqMsg, Int),
+  _state: ReqState,
+  data: Int,
+) -> state_machine.Step(ReqState, Int, ReqMsg, Int) {
+  case event {
+    state_machine.Call(from, GetCounter) ->
+      state_machine.keep_state(data, [state_machine.Reply(from, data)])
+    state_machine.Info(Increment) -> state_machine.keep_state(data + 1, [])
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn send_request_returns_reply_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 0)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  let req: state_machine.ReqId(Int) =
+    state_machine.send_request(machine.data, GetCounter)
+  let assert Ok(count) = state_machine.receive_response(req, 1000)
+  count |> should.equal(0)
+}
+
+pub fn send_request_sees_latest_state_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 0)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  process.send(machine.data, Increment)
+  process.send(machine.data, Increment)
+
+  let req: state_machine.ReqId(Int) =
+    state_machine.send_request(machine.data, GetCounter)
+  let assert Ok(count) = state_machine.receive_response(req, 1000)
+  count |> should.equal(2)
+}
+
+pub fn reqids_size_reflects_pending_requests_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 0)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  let coll: state_machine.ReqIdCollection(String, Int) =
+    state_machine.reqids_new()
+  state_machine.reqids_size(coll) |> should.equal(0)
+
+  let coll =
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "first",
+      coll,
+    )
+  state_machine.reqids_size(coll) |> should.equal(1)
+
+  let coll =
+    state_machine.send_request_to_collection(
+      machine.data,
+      GetCounter,
+      "second",
+      coll,
+    )
+  state_machine.reqids_size(coll) |> should.equal(2)
+
+  let assert state_machine.GotReply(_, _, coll) =
+    state_machine.receive_response_collection(coll, 1000, True)
+  let assert state_machine.GotReply(_, _, coll) =
+    state_machine.receive_response_collection(coll, 1000, True)
+  state_machine.reqids_size(coll) |> should.equal(0)
+}
+
+pub fn send_request_to_collection_delivers_both_replies_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 42)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  let coll: state_machine.ReqIdCollection(String, Int) =
+    state_machine.reqids_new()
+  let coll =
+    state_machine.send_request_to_collection(machine.data, GetCounter, "a", coll)
+  let coll =
+    state_machine.send_request_to_collection(machine.data, GetCounter, "b", coll)
+
+  let assert state_machine.GotReply(v1, _l1, coll) =
+    state_machine.receive_response_collection(coll, 1000, True)
+  let assert state_machine.GotReply(v2, _l2, _) =
+    state_machine.receive_response_collection(coll, 1000, True)
+
+  v1 |> should.equal(42)
+  v2 |> should.equal(42)
+}
+
+pub fn reqids_to_list_contains_all_entries_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 0)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  let coll: state_machine.ReqIdCollection(String, Int) =
+    state_machine.reqids_new()
+  let coll =
+    state_machine.send_request_to_collection(machine.data, GetCounter, "x", coll)
+  let coll =
+    state_machine.send_request_to_collection(machine.data, GetCounter, "y", coll)
+
+  let entries = state_machine.reqids_to_list(coll)
+  list.length(entries) |> should.equal(2)
+
+  let assert state_machine.GotReply(_, _, coll) =
+    state_machine.receive_response_collection(coll, 1000, True)
+  let assert state_machine.GotReply(_, _, _) =
+    state_machine.receive_response_collection(coll, 1000, True)
+}
+
+pub fn reqids_add_manually_adds_to_collection_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ReqRunning, initial_data: 7)
+    |> state_machine.on_event(reqid_handler)
+    |> state_machine.start
+
+  let req: state_machine.ReqId(Int) =
+    state_machine.send_request(machine.data, GetCounter)
+  let coll: state_machine.ReqIdCollection(String, Int) =
+    state_machine.reqids_new()
+  let coll = state_machine.reqids_add(req_id: req, label: "manual", to: coll)
+  state_machine.reqids_size(coll) |> should.equal(1)
+
+  let assert state_machine.GotReply(val, label, _) =
+    state_machine.receive_response_collection(coll, 1000, True)
+  val |> should.equal(7)
+  label |> should.equal("manual")
 }
