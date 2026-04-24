@@ -10,6 +10,7 @@
 //// - Returns strongly-typed Steps instead of various tuple formats
 ////
 
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type ExitReason, type Pid, type Subject}
 import gleam/option.{type Option, None, Some}
@@ -148,6 +149,38 @@ pub type StartError {
 /// Convenience type for start results.
 pub type StartResult(data) =
   Result(Started(data), StartError)
+
+/// An opaque request ID returned by `send_request`.
+///
+/// The phantom type `reply` tracks the expected response type at compile time.
+/// Requires Erlang/OTP 25.0 or later.
+///
+pub type ReqId(reply)
+
+/// A collection of in-flight request IDs, each associated with a `label`.
+///
+/// Used with `send_request_to_collection`, `reqids_add`, and
+/// `receive_response_collection` to manage multiple concurrent requests.
+/// Requires Erlang/OTP 25.0 or later.
+///
+pub type ReqIdCollection(label, reply)
+
+/// The result of waiting for a response from a `ReqIdCollection`.
+///
+pub type CollectionResponse(reply, label) {
+  /// A successful reply was received for one of the pending requests.
+  GotReply(reply: reply, label: label, remaining: ReqIdCollection(label, reply))
+
+  /// One of the requests returned an error (e.g. the server crashed).
+  RequestFailed(
+    reason: Dynamic,
+    label: label,
+    remaining: ReqIdCollection(label, reply),
+  )
+
+  /// The collection had no pending requests.
+  NoRequests
+}
 
 /// Create a new state machine builder with initial state and data.
 ///
@@ -564,3 +597,124 @@ pub fn call(
 ) -> reply {
   process.call(subject, timeout, make_message)
 }
+
+// ── reqids API (OTP 25.0+) ─────────────────────────────────────────────────
+
+/// Create a new, empty request-id collection.
+///
+/// Used with `send_request_to_collection` to batch multiple async requests and
+/// then receive them through `receive_response_collection`.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "reqids_new")
+pub fn reqids_new() -> ReqIdCollection(label, reply)
+
+/// Add a `ReqId` to a collection under a `label`.
+///
+/// The label is returned alongside the reply in `receive_response_collection`,
+/// letting you identify which request the response belongs to.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "reqids_add")
+pub fn reqids_add(
+  req_id req_id: ReqId(reply),
+  label label: label,
+  to collection: ReqIdCollection(label, reply),
+) -> ReqIdCollection(label, reply)
+
+/// Return the number of pending request IDs in a collection.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "reqids_size")
+pub fn reqids_size(collection: ReqIdCollection(label, reply)) -> Int
+
+/// Convert a collection to a list of `#(ReqId, label)` pairs.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "reqids_to_list")
+pub fn reqids_to_list(
+  collection: ReqIdCollection(label, reply),
+) -> List(#(ReqId(reply), label))
+
+/// Send an asynchronous call to a state machine and return a `ReqId`.
+///
+/// Unlike `call`, this does not block. Use `receive_response` later to
+/// collect the reply. The server receives a `Call(from, message)` event
+/// and must reply with a `Reply(from, value)` action.
+///
+/// The `reply` type cannot always be inferred — annotate the binding when
+/// needed: `let req: ReqId(MyReply) = send_request(subject, MyMsg)`
+///
+/// ## Example
+///
+/// ```gleam
+/// let req: state_machine.ReqId(Int) = state_machine.send_request(machine.data, GetCount)
+/// // ... do other work ...
+/// let assert Ok(count) = state_machine.receive_response(req, 1000)
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "send_request")
+pub fn send_request(subject: Subject(msg), message: msg) -> ReqId(reply)
+
+/// Send an asynchronous call and immediately add the `ReqId` to a collection.
+///
+/// Equivalent to calling `send_request` and `reqids_add` in one step. Useful
+/// for issuing several requests in a loop before waiting for any of them.
+///
+/// ## Example
+///
+/// ```gleam
+/// let coll: state_machine.ReqIdCollection(String, Int) = state_machine.reqids_new()
+/// let coll = state_machine.send_request_to_collection(sub, GetCount, "first", coll)
+/// let coll = state_machine.send_request_to_collection(sub, GetCount, "second", coll)
+/// // ... receive responses via receive_response_collection ...
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "send_request_to_collection")
+pub fn send_request_to_collection(
+  subject: Subject(msg),
+  message: msg,
+  label: label,
+  to collection: ReqIdCollection(label, reply),
+) -> ReqIdCollection(label, reply)
+
+/// Wait up to `timeout` milliseconds for the reply to a single `ReqId`.
+///
+/// Returns `Ok(reply)` on success or `Error(reason)` on failure or timeout.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "receive_response")
+pub fn receive_response(
+  req_id: ReqId(reply),
+  timeout: Int,
+) -> Result(reply, Dynamic)
+
+/// Wait up to `timeout` milliseconds for any pending reply in a collection.
+///
+/// When `delete` is `True`, the matched request is removed from the returned
+/// collection. Call this in a loop to drain all responses one by one.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert state_machine.GotReply(val, label, coll) =
+///   state_machine.receive_response_collection(coll, 1000, True)
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "statem_ffi", "receive_response_collection")
+pub fn receive_response_collection(
+  collection: ReqIdCollection(label, reply),
+  timeout: Int,
+  delete: Bool,
+) -> CollectionResponse(reply, label)
