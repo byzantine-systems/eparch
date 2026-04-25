@@ -1,12 +1,12 @@
 //// A type-safe, OTP-compatible, finite state machine implementation that
-//// leverages Erlang's [gen_statem](https://www.erlang.org/doc/apps/stdlib/gen_statem.html) behavior throught the [Gleam ffi](https://gleam.run/documentation/externals/#Erlang-externals).
+//// leverages Erlang's [gen_statem](https://www.erlang.org/doc/apps/stdlib/gen_statem.html) behavior through the [Gleam ffi](https://gleam.run/documentation/externals/#Erlang-externals).
 ////
 //// ## Differences from `gen_statem`
 ////
 //// Unlike Erlang's `gen_statem`, this implementation:
 //// - Uses a single `Event` type to unify calls, casts, and info messages
 //// - Makes actions explicit and type-safe (no raw tuples)
-//// - Makes [state_enter](https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:state_enter/0) an opt-in feature, you need to explicity set it so in the Builder.
+//// - Makes [state_enter](https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:state_enter/0) an opt-in feature, you need to explicitly set it so in the Builder.
 //// - Returns strongly-typed Steps instead of various tuple formats
 ////
 
@@ -25,20 +25,88 @@ type StateEnter {
 /// Generic parameters:
 /// - `state`: The type of state values (e.g., enum, custom type)
 /// - `data`: The type of data carried across state transitions
-/// - `msg`: The type of messages the state machine receives
+/// - `message`: The type of messages the state machine receives
 /// - `return`: What the start function returns to the parent
+/// - `reply`: The type of replies produced for synchronous `Call` events
 ///
-pub opaque type Builder(state, data, msg, return, reply) {
+pub opaque type Builder(state, data, message, return, reply) {
   Builder(
     initial_state: state,
     initial_data: data,
-    event_handler: fn(Event(state, msg, reply), state, data) ->
-      Step(state, data, msg, reply),
+    event_handler: fn(Event(state, message, reply), state, data) ->
+      Step(state, data, message, reply),
     state_enter: StateEnter,
     initialisation_timeout: Int,
-    name: Option(process.Name(msg)),
+    name: Option(process.Name(message)),
     on_code_change: Option(fn(data) -> data),
+    on_format_status: Option(
+      fn(Status(state, data, message, reply)) ->
+        Status(state, data, message, reply),
+    ),
   )
+}
+
+/// Snapshot of the state machine passed to the `format_status` callback.
+///
+/// Mirrors the OTP 25+ `format_status/1` map for `gen_statem`. The `state`
+/// and `data` fields always carry the current typed values. The remaining
+/// fields correspond to OTP map keys that are only present in certain
+/// contexts (e.g. `reason` during termination, `queue` during sys calls).
+/// Return a modified `Status` from your formatter to control what
+/// `sys:get_status/1` and SASL crash reports display.
+///
+/// `log` stays as `List(Dynamic)` because `sys:system_event()` is an
+/// internal Erlang shape with no stable Gleam equivalent.
+///
+pub type Status(state, data, message, reply) {
+  Status(
+    state: state,
+    data: data,
+    reason: Option(StopReason),
+    queue: List(QueuedEvent(message, reply)),
+    postponed: List(QueuedEvent(message, reply)),
+    timeouts: List(ActiveTimeout(message)),
+    log: List(Dynamic),
+  )
+}
+
+/// Termination reason as seen by `format_status/1`.
+///
+/// `Exit` wraps a recognised `process.ExitReason`. `RawReason` is a fallback
+/// for reasons the FFI cannot classify (e.g. `{shutdown, _}`, `{noproc, _}`,
+/// arbitrary user terms) so callers can still inspect or replace them.
+///
+pub type StopReason {
+  Exit(reason: ExitReason)
+  RawReason(term: Dynamic)
+}
+
+/// A pending event on the gen_statem queue or in the postponed list.
+///
+/// Mirrors the `Event` type but without the `Enter` variant (state-entry
+/// events never queue). `QueuedOther` is a fallback for shapes the FFI does
+/// not recognise, so the formatter never crashes on an unexpected OTP event
+/// type.
+///
+pub type QueuedEvent(message, reply) {
+  QueuedCall(from: From(reply), message: message)
+  QueuedCast(message: message)
+  QueuedInfo(message: message)
+  QueuedInternal(message: message)
+  QueuedStateTimeout(content: message)
+  QueuedGenericTimeout(name: String, content: message)
+  QueuedOther(raw: Dynamic)
+}
+
+/// An armed (not-yet-fired) timeout on the state machine.
+///
+/// `ActiveOtherTimeout` handles any shape the FFI cannot classify as a
+/// state or generic timeout.
+///
+pub type ActiveTimeout(message) {
+  ActiveStateTimeout(content: message)
+  ActiveGenericTimeout(name: String, content: message)
+  ActiveOtherTimeout(raw: Dynamic)
 }
 
 /// Events that a state machine can receive.
@@ -48,15 +116,15 @@ pub opaque type Builder(state, data, msg, return, reply) {
 /// - Casts (asynchronous / fire-and-forget)
 /// - Info (other messages, from selectors/monitors)
 ///
-pub type Event(state, msg, reply) {
+pub type Event(state, message, reply) {
   /// A synchronous call that expects a reply
-  Call(from: From(reply), message: msg)
+  Call(from: From(reply), message: message)
 
   /// An asynchronous cast (fire-and-forget)
-  Cast(message: msg)
+  Cast(message: message)
 
   /// An info message (from selectors, monitors, etc)
-  Info(message: msg)
+  Info(message: message)
 
   /// Internal event fired when entering a state (if state_enter enabled)
   /// Contains the previous state
@@ -70,12 +138,12 @@ pub type Event(state, msg, reply) {
 ///
 /// Indicates what the state machine should do next.
 ///
-pub type Step(state, data, msg, reply) {
+pub type Step(state, data, message, reply) {
   /// Transition to a new state
-  NextState(state: state, data: data, actions: List(Action(msg, reply)))
+  NextState(state: state, data: data, actions: List(Action(message, reply)))
 
   /// Keep the current state
-  KeepState(data: data, actions: List(Action(msg, reply)))
+  KeepState(data: data, actions: List(Action(message, reply)))
 
   /// Stop the state machine
   Stop(reason: ExitReason)
@@ -85,7 +153,7 @@ pub type Step(state, data, msg, reply) {
 ///
 /// Multiple actions can be returned as a list.
 ///
-pub type Action(msg, reply) {
+pub type Action(message, reply) {
   /// Send a reply to a caller
   Reply(from: From(reply), response: reply)
 
@@ -93,7 +161,7 @@ pub type Action(msg, reply) {
   Postpone
 
   /// Insert a new event at the front of the queue
-  NextEvent(content: msg)
+  NextEvent(content: message)
 
   /// Set a state timeout (canceled on state change)
   StateTimeout(milliseconds: Int)
@@ -155,27 +223,48 @@ pub type StartResult(data) =
 /// The phantom type `reply` tracks the expected response type at compile time.
 /// Requires Erlang/OTP 25.0 or later.
 ///
-pub type ReqId(reply)
+pub type RequestId(reply)
 
 /// A collection of in-flight request IDs, each associated with a `label`.
 ///
-/// Used with `send_request_to_collection`, `reqids_add`, and
+/// Used with `send_request_to_collection`, `request_ids_add`, and
 /// `receive_response_collection` to manage multiple concurrent requests.
 /// Requires Erlang/OTP 25.0 or later.
 ///
-pub type ReqIdCollection(label, reply)
+pub type RequestIdCollection(label, reply)
 
-/// The result of waiting for a response from a `ReqIdCollection`.
+/// Whether `receive_response_collection` removes the matched request from
+/// the collection after delivering the reply.
+///
+pub type ResponseHandling {
+  Delete
+  Keep
+}
+
+/// Reasons `receive_response` and `receive_response_collection` can fail.
+///
+pub type ReceiveError {
+  /// No reply was received within the timeout.
+  ReceiveTimeout
+  /// The server handling the request crashed or went away.
+  RequestCrashed(reason: StopReason)
+}
+
+/// The result of waiting for a response from a `RequestIdCollection`.
 ///
 pub type CollectionResponse(reply, label) {
   /// A successful reply was received for one of the pending requests.
-  GotReply(reply: reply, label: label, remaining: ReqIdCollection(label, reply))
+  GotReply(
+    reply: reply,
+    label: label,
+    remaining: RequestIdCollection(label, reply),
+  )
 
   /// One of the requests returned an error (e.g. the server crashed).
   RequestFailed(
-    reason: Dynamic,
+    reason: StopReason,
     label: label,
-    remaining: ReqIdCollection(label, reply),
+    remaining: RequestIdCollection(label, reply),
   )
 
   /// The collection had no pending requests.
@@ -198,7 +287,7 @@ pub type CollectionResponse(reply, label) {
 pub fn new(
   initial_state initial_state: state,
   initial_data initial_data: data,
-) -> Builder(state, data, msg, Subject(msg), reply) {
+) -> Builder(state, data, message, Subject(message), reply) {
   Builder(
     initial_state: initial_state,
     initial_data: initial_data,
@@ -207,6 +296,7 @@ pub fn new(
     initialisation_timeout: 1000,
     name: None,
     on_code_change: None,
+    on_format_status: None,
   )
 }
 
@@ -219,15 +309,15 @@ pub fn new(
 /// ## Example
 ///
 /// ```gleam
-/// fn handle_event(event, state, data) {
-///   case event, state {
-///     Call(from, GetCount), Running ->
-///       keep_state(data, [Reply(from, data.count)])
-///
-///     Cast(Increment), Running ->
-///       keep_state(Data(..data, count: data.count + 1), [])
-///
-///     _, _ -> keep_state(data, [])
+/// fn handle_event(event, _state, data) {
+///   case event {
+///     Call(from, GetCount) -> reply_and_keep(from, data.count, data)
+///     Cast(Increment) -> keep_state(Data(..data, count: data.count + 1), [])
+///     Call(_, _) -> keep_state(data, [])
+///     Cast(_) -> keep_state(data, [])
+///     Info(_) -> keep_state(data, [])
+///     Enter(_) -> keep_state(data, [])
+///     Timeout(_) -> keep_state(data, [])
 ///   }
 /// }
 ///
@@ -237,10 +327,10 @@ pub fn new(
 /// ```
 ///
 pub fn on_event(
-  builder: Builder(state, data, msg, return, reply),
-  handler: fn(Event(state, msg, reply), state, data) ->
-    Step(state, data, msg, reply),
-) -> Builder(state, data, msg, return, reply) {
+  builder: Builder(state, data, message, return, reply),
+  handler: fn(Event(state, message, reply), state, data) ->
+    Step(state, data, message, reply),
+) -> Builder(state, data, message, return, reply) {
   Builder(..builder, event_handler: handler)
 }
 
@@ -255,13 +345,13 @@ pub fn on_event(
 /// ## Example
 ///
 /// ```gleam
-/// fn handle_event(event, state, data) {
-///   case event, state {
-///     Enter(old), Active if old != Active -> {
-///       // Perform entry actions
-///       keep_state(data, [StateTimeout(30_000)])
-///     }
-///     _, _ -> keep_state(data, [])
+/// fn handle_event(event, _state, data) {
+///   case event {
+///     Enter(_old) -> keep_state(data, [StateTimeout(30_000)])
+///     Call(_, _) -> keep_state(data, [])
+///     Cast(_) -> keep_state(data, [])
+///     Info(_) -> keep_state(data, [])
+///     Timeout(_) -> keep_state(data, [])
 ///   }
 /// }
 ///
@@ -272,8 +362,8 @@ pub fn on_event(
 /// ```
 ///
 pub fn with_state_enter(
-  builder: Builder(state, data, msg, return, reply),
-) -> Builder(state, data, msg, return, reply) {
+  builder: Builder(state, data, message, return, reply),
+) -> Builder(state, data, message, return, reply) {
   Builder(..builder, state_enter: StateEnterEnabled)
 }
 
@@ -282,9 +372,9 @@ pub fn with_state_enter(
 /// This enables sending messages to it via a named subject.
 ///
 pub fn named(
-  builder: Builder(state, data, msg, return, reply),
-  name: process.Name(msg),
-) -> Builder(state, data, msg, return, reply) {
+  builder: Builder(state, data, message, return, reply),
+  name: process.Name(message),
+) -> Builder(state, data, message, return, reply) {
   Builder(..builder, name: Some(name))
 }
 
@@ -310,10 +400,41 @@ pub fn named(
 /// ```
 ///
 pub fn on_code_change(
-  builder: Builder(state, data, msg, return, reply),
+  builder: Builder(state, data, message, return, reply),
   handler: fn(data) -> data,
-) -> Builder(state, data, msg, return, reply) {
+) -> Builder(state, data, message, return, reply) {
   Builder(..builder, on_code_change: Some(handler))
+}
+
+/// Provide a formatter called when `sys:get_status/1` or SASL crash reports
+/// render the state machine.
+///
+/// Maps to OTP's [`format_status/1`](https://www.erlang.org/doc/apps/stdlib/gen_statem.html#c:format_status/1)
+/// gen_statem callback. The formatter receives a `Status` value containing
+/// the current state and data (plus optional fields described on the
+/// `Status` type) and returns a transformed `Status`. Use this to redact
+/// sensitive fields or produce a more readable representation.
+///
+/// If not set, `sys:get_status/1` receives the raw internal state without
+/// transformation.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: Credentials("secret"))
+/// |> state_machine.on_format_status(fn(status) {
+///   Status(..status, data: Credentials("<redacted>"))
+/// })
+/// |> state_machine.on_event(handle_event)
+/// |> state_machine.start
+/// ```
+///
+pub fn on_format_status(
+  builder: Builder(state, data, message, return, reply),
+  formatter: fn(Status(state, data, message, reply)) ->
+    Status(state, data, message, reply),
+) -> Builder(state, data, message, return, reply) {
+  Builder(..builder, on_format_status: Some(formatter))
 }
 
 /// Start the state machine process.
@@ -338,8 +459,8 @@ pub fn on_code_change(
 /// ```
 ///
 pub fn start(
-  builder: Builder(state, data, msg, Subject(msg), reply),
-) -> Result(Started(Subject(msg)), StartError) {
+  builder: Builder(state, data, message, Subject(message), reply),
+) -> StartResult(Subject(message)) {
   let Builder(
     initial_state:,
     initial_data:,
@@ -348,6 +469,7 @@ pub fn start(
     initialisation_timeout:,
     name:,
     on_code_change:,
+    on_format_status:,
   ) = builder
   do_start(
     initial_state,
@@ -357,6 +479,7 @@ pub fn start(
     initialisation_timeout,
     name,
     on_code_change,
+    on_format_status,
   )
 }
 
@@ -364,13 +487,17 @@ pub fn start(
 fn do_start(
   initial_state: state,
   initial_data: data,
-  event_handler: fn(Event(state, msg, reply), state, data) ->
-    Step(state, data, msg, reply),
+  event_handler: fn(Event(state, message, reply), state, data) ->
+    Step(state, data, message, reply),
   state_enter: StateEnter,
   initialisation_timeout: Int,
-  name: Option(process.Name(msg)),
+  name: Option(process.Name(message)),
   on_code_change: Option(fn(data) -> data),
-) -> Result(Started(Subject(msg)), StartError)
+  on_format_status: Option(
+    fn(Status(state, data, message, reply)) ->
+      Status(state, data, message, reply),
+  ),
+) -> Result(Started(Subject(message)), StartError)
 
 /// Create a NextState step indicating a state transition.
 ///
@@ -383,8 +510,8 @@ fn do_start(
 pub fn next_state(
   state: state,
   data: data,
-  actions: List(Action(msg, reply)),
-) -> Step(state, data, msg, reply) {
+  actions: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
   NextState(state:, data:, actions:)
 }
 
@@ -398,8 +525,8 @@ pub fn next_state(
 ///
 pub fn keep_state(
   data: data,
-  actions: List(Action(msg, reply)),
-) -> Step(state, data, msg, reply) {
+  actions: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
   KeepState(data:, actions:)
 }
 
@@ -411,7 +538,7 @@ pub fn keep_state(
 /// stop(process.Normal)
 /// ```
 ///
-pub fn stop(reason: ExitReason) -> Step(state, data, msg, reply) {
+pub fn stop(reason: ExitReason) -> Step(state, data, message, reply) {
   Stop(reason:)
 }
 
@@ -426,7 +553,7 @@ pub fn stop(reason: ExitReason) -> Step(state, data, msg, reply) {
 /// }
 /// ```
 ///
-pub fn reply(from: From(reply), response: reply) -> Action(msg, reply) {
+pub fn reply(from: From(reply), response: reply) -> Action(message, reply) {
   Reply(from:, response:)
 }
 
@@ -434,7 +561,7 @@ pub fn reply(from: From(reply), response: reply) -> Action(msg, reply) {
 ///
 /// Postpones the current event until after the next state change.
 ///
-pub fn postpone() -> Action(msg, reply) {
+pub fn postpone() -> Action(message, reply) {
   Postpone
 }
 
@@ -442,7 +569,7 @@ pub fn postpone() -> Action(msg, reply) {
 ///
 /// Inserts a new event at the front of the event queue.
 ///
-pub fn next_event(content: msg) -> Action(msg, reply) {
+pub fn next_event(content: message) -> Action(message, reply) {
   NextEvent(content:)
 }
 
@@ -450,7 +577,7 @@ pub fn next_event(content: msg) -> Action(msg, reply) {
 ///
 /// Sets a timeout that is automatically canceled when the state changes.
 ///
-pub fn state_timeout(milliseconds: Int) -> Action(msg, reply) {
+pub fn state_timeout(milliseconds: Int) -> Action(message, reply) {
   StateTimeout(milliseconds:)
 }
 
@@ -458,7 +585,10 @@ pub fn state_timeout(milliseconds: Int) -> Action(msg, reply) {
 ///
 /// Sets a named timeout that persists across state changes.
 ///
-pub fn generic_timeout(name: String, milliseconds: Int) -> Action(msg, reply) {
+pub fn generic_timeout(
+  name: String,
+  milliseconds: Int,
+) -> Action(message, reply) {
   GenericTimeout(name:, milliseconds:)
 }
 
@@ -477,7 +607,7 @@ pub fn generic_timeout(name: String, milliseconds: Int) -> Action(msg, reply) {
 /// state_machine.change_callback_module(atom.create("my_erlang_module"))
 /// ```
 ///
-pub fn change_callback_module(module: Atom) -> Action(msg, reply) {
+pub fn change_callback_module(module: Atom) -> Action(message, reply) {
   ChangeCallbackModule(module:)
 }
 
@@ -495,7 +625,7 @@ pub fn change_callback_module(module: Atom) -> Action(msg, reply) {
 /// state_machine.push_callback_module(atom.create("my_erlang_module"))
 /// ```
 ///
-pub fn push_callback_module(module: Atom) -> Action(msg, reply) {
+pub fn push_callback_module(module: Atom) -> Action(message, reply) {
   PushCallbackModule(module:)
 }
 
@@ -513,7 +643,7 @@ pub fn push_callback_module(module: Atom) -> Action(msg, reply) {
 /// state_machine.pop_callback_module()
 /// ```
 ///
-pub fn pop_callback_module() -> Action(msg, reply) {
+pub fn pop_callback_module() -> Action(message, reply) {
   PopCallbackModule
 }
 
@@ -530,7 +660,7 @@ pub fn reply_and_next(
   response: reply,
   state: state,
   data: data,
-) -> Step(state, data, msg, reply) {
+) -> Step(state, data, message, reply) {
   NextState(state:, data:, actions: [Reply(from:, response:)])
 }
 
@@ -546,27 +676,27 @@ pub fn reply_and_keep(
   from: From(reply),
   response: reply,
   data: data,
-) -> Step(state, data, msg, reply) {
+) -> Step(state, data, message, reply) {
   KeepState(data:, actions: [Reply(from:, response:)])
 }
 
 /// Send a message to a state machine via `process.send` (arrives as `Info`).
 ///
-/// The message is delivered to the handler as `Info(msg)`. Use this for
+/// The message is delivered to the handler as `Info(message)`. Use this for
 /// messages sent from processes that are not aware of this library, e.g.
 /// monitors, timers, or plain Erlang processes.
 ///
-/// To deliver messages as `Cast(msg)` instead, use `cast/2`.
+/// To deliver messages as `Cast(message)` instead, use `cast/2`.
 ///
-pub fn send(subject: Subject(msg), msg: msg) -> Nil {
-  process.send(subject, msg)
+pub fn send(subject: Subject(message), message: message) -> Nil {
+  process.send(subject, message)
 }
 
 /// Send an asynchronous cast to a state machine (arrives as `Cast`).
 ///
 /// Unlike `send`, which routes messages through `process.send` and delivers
-/// them as `Info(msg)`, this function calls `gen_statem:cast` so messages
-/// arrive as `Cast(msg)` in the event handler.
+/// them as `Info(message)`, this function calls `gen_statem:cast` so messages
+/// arrive as `Cast(message)` in the event handler.
 ///
 /// Use `cast` when you want to distinguish machine-level commands from
 /// ambient info messages (monitors, raw Erlang signals, etc.).
@@ -574,17 +704,20 @@ pub fn send(subject: Subject(msg), msg: msg) -> Nil {
 /// ## Example
 ///
 /// ```gleam
-/// fn handle_event(event, state, data) {
+/// fn handle_event(event, _state, data) {
 ///   case event {
 ///     Cast(Increment) -> keep_state(data + 1, [])
-///     Info(_)         -> keep_state(data, [])   // ignore ambient noise
-///     _               -> keep_state(data, [])
+///     Cast(_) -> keep_state(data, [])
+///     Info(_) -> keep_state(data, []) // ignore ambient noise
+///     Call(_, _) -> keep_state(data, [])
+///     Enter(_) -> keep_state(data, [])
+///     Timeout(_) -> keep_state(data, [])
 ///   }
 /// }
 /// ```
 ///
 @external(erlang, "statem_ffi", "cast")
-pub fn cast(subject: Subject(msg), msg: msg) -> Nil
+pub fn cast(subject: Subject(message), message: message) -> Nil
 
 /// Send a synchronous call and wait for a reply.
 ///
@@ -598,7 +731,7 @@ pub fn call(
   process.call(subject, timeout, make_message)
 }
 
-// ── reqids API (OTP 25.0+) ─────────────────────────────────────────────────
+// request-id API (OTP 25.0+)
 
 /// Create a new, empty request-id collection.
 ///
@@ -608,9 +741,9 @@ pub fn call(
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "reqids_new")
-pub fn reqids_new() -> ReqIdCollection(label, reply)
+pub fn request_ids_new() -> RequestIdCollection(label, reply)
 
-/// Add a `ReqId` to a collection under a `label`.
+/// Add a `RequestId` to a collection under a `label`.
 ///
 /// The label is returned alongside the reply in `receive_response_collection`,
 /// letting you identify which request the response belongs to.
@@ -618,61 +751,70 @@ pub fn reqids_new() -> ReqIdCollection(label, reply)
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "reqids_add")
-pub fn reqids_add(
-  req_id req_id: ReqId(reply),
+pub fn request_ids_add(
+  request_id request_id: RequestId(reply),
   label label: label,
-  to collection: ReqIdCollection(label, reply),
-) -> ReqIdCollection(label, reply)
+  to collection: RequestIdCollection(label, reply),
+) -> RequestIdCollection(label, reply)
 
 /// Return the number of pending request IDs in a collection.
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "reqids_size")
-pub fn reqids_size(collection: ReqIdCollection(label, reply)) -> Int
+pub fn request_ids_size(collection: RequestIdCollection(label, reply)) -> Int
 
-/// Convert a collection to a list of `#(ReqId, label)` pairs.
+/// Convert a collection to a list of `#(RequestId, label)` pairs.
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "reqids_to_list")
-pub fn reqids_to_list(
-  collection: ReqIdCollection(label, reply),
-) -> List(#(ReqId(reply), label))
+pub fn request_ids_to_list(
+  collection: RequestIdCollection(label, reply),
+) -> List(#(RequestId(reply), label))
 
-/// Send an asynchronous call to a state machine and return a `ReqId`.
+/// Send an asynchronous call to a state machine and return a `RequestId`.
 ///
 /// Unlike `call`, this does not block. Use `receive_response` later to
 /// collect the reply. The server receives a `Call(from, message)` event
 /// and must reply with a `Reply(from, value)` action.
 ///
-/// The `reply` type cannot always be inferred — annotate the binding when
-/// needed: `let req: ReqId(MyReply) = send_request(subject, MyMsg)`
+/// The `reply` type cannot always be inferred, so annotate the binding when
+/// needed: `let request: RequestId(MyReply) = send_request(subject, MyMsg)`
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let req: state_machine.ReqId(Int) = state_machine.send_request(machine.data, GetCount)
+/// let request: state_machine.RequestId(Int) =
+///   state_machine.send_request(machine.data, GetCount)
 /// // ... do other work ...
-/// let assert Ok(count) = state_machine.receive_response(req, 1000)
+/// let assert Ok(count) = state_machine.receive_response(request, 1000)
 /// ```
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "send_request")
-pub fn send_request(subject: Subject(msg), message: msg) -> ReqId(reply)
+pub fn send_request(
+  subject: Subject(message),
+  message: message,
+) -> RequestId(reply)
 
-/// Send an asynchronous call and immediately add the `ReqId` to a collection.
+/// Send an asynchronous call and immediately add the `RequestId` to a
+/// collection.
 ///
-/// Equivalent to calling `send_request` and `reqids_add` in one step. Useful
-/// for issuing several requests in a loop before waiting for any of them.
+/// Equivalent to calling `send_request` and `request_ids_add` in one step.
+/// Useful for issuing several requests in a loop before waiting for any of
+/// them.
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let coll: state_machine.ReqIdCollection(String, Int) = state_machine.reqids_new()
-/// let coll = state_machine.send_request_to_collection(sub, GetCount, "first", coll)
-/// let coll = state_machine.send_request_to_collection(sub, GetCount, "second", coll)
+/// let collection: state_machine.RequestIdCollection(String, Int) =
+///   state_machine.request_ids_new()
+/// let collection =
+///   state_machine.send_request_to_collection(sub, GetCount, "first", collection)
+/// let collection =
+///   state_machine.send_request_to_collection(sub, GetCount, "second", collection)
 /// // ... receive responses via receive_response_collection ...
 /// ```
 ///
@@ -680,41 +822,44 @@ pub fn send_request(subject: Subject(msg), message: msg) -> ReqId(reply)
 ///
 @external(erlang, "statem_ffi", "send_request_to_collection")
 pub fn send_request_to_collection(
-  subject: Subject(msg),
-  message: msg,
+  subject: Subject(message),
+  message: message,
   label: label,
-  to collection: ReqIdCollection(label, reply),
-) -> ReqIdCollection(label, reply)
+  to collection: RequestIdCollection(label, reply),
+) -> RequestIdCollection(label, reply)
 
-/// Wait up to `timeout` milliseconds for the reply to a single `ReqId`.
+/// Wait up to `timeout` milliseconds for the reply to a single `RequestId`.
 ///
-/// Returns `Ok(reply)` on success or `Error(reason)` on failure or timeout.
+/// Returns `Ok(reply)` on success, `Error(ReceiveTimeout)` if no reply
+/// arrives in time, or `Error(RequestCrashed(reason))` if the server
+/// terminated before replying.
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "receive_response")
 pub fn receive_response(
-  req_id: ReqId(reply),
+  request_id: RequestId(reply),
   timeout: Int,
-) -> Result(reply, Dynamic)
+) -> Result(reply, ReceiveError)
 
 /// Wait up to `timeout` milliseconds for any pending reply in a collection.
 ///
-/// When `delete` is `True`, the matched request is removed from the returned
-/// collection. Call this in a loop to drain all responses one by one.
+/// Pass `Delete` to remove the matched request from the returned collection,
+/// or `Keep` to retain it. Call this in a loop to drain all responses one by
+/// one.
 ///
 /// ## Example
 ///
 /// ```gleam
-/// let assert state_machine.GotReply(val, label, coll) =
-///   state_machine.receive_response_collection(coll, 1000, True)
+/// let assert state_machine.GotReply(value, label, collection) =
+///   state_machine.receive_response_collection(collection, 1000, state_machine.Delete)
 /// ```
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
 @external(erlang, "statem_ffi", "receive_response_collection")
 pub fn receive_response_collection(
-  collection: ReqIdCollection(label, reply),
+  collection: RequestIdCollection(label, reply),
   timeout: Int,
-  delete: Bool,
+  handling: ResponseHandling,
 ) -> CollectionResponse(reply, label)
