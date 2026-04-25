@@ -142,11 +142,25 @@ pub type Step(state, data, message, reply) {
   /// Transition to a new state
   NextState(state: state, data: data, actions: List(Action(message, reply)))
 
-  /// Keep the current state
+  /// Keep the current state, updating data
   KeepState(data: data, actions: List(Action(message, reply)))
+
+  /// Keep the current state without re-specifying data (OTP optimization).
+  KeepStateAndData(actions: List(Action(message, reply)))
+
+  /// Re-enter the current state with new data, re-triggering the state_enter
+  /// callback if enabled.
+  RepeatState(data: data, actions: List(Action(message, reply)))
+
+  /// Re-enter the current state without changing data.
+  RepeatStateAndData(actions: List(Action(message, reply)))
 
   /// Stop the state machine
   Stop(reason: ExitReason)
+
+  /// Stop the state machine and atomically send replies to pending callers.
+  /// Only `Reply(from, response)` actions are valid in the replies list.
+  StopAndReply(reason: ExitReason, replies: List(Action(message, reply)))
 }
 
 /// Actions (side effects) to perform after handling an event.
@@ -530,6 +544,35 @@ pub fn keep_state(
   KeepState(data:, actions:)
 }
 
+/// Keep the current state without re-specifying data.
+///
+/// Use instead of `keep_state` when data has not changed, to avoid
+/// an unnecessary copy in the `#gleam_statem` record.
+///
+pub fn keep_state_and_data(
+  actions: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
+  KeepStateAndData(actions: actions)
+}
+
+/// Re-enter the current state with new data, re-triggering the state_enter
+/// callback if enabled.
+///
+pub fn repeat_state(
+  data: data,
+  actions: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
+  RepeatState(data: data, actions: actions)
+}
+
+/// Re-enter the current state without changing data.
+///
+pub fn repeat_state_and_data(
+  actions: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
+  RepeatStateAndData(actions: actions)
+}
+
 /// Create a Stop step indicating the state machine should terminate.
 ///
 /// ## Example
@@ -540,6 +583,17 @@ pub fn keep_state(
 ///
 pub fn stop(reason: ExitReason) -> Step(state, data, message, reply) {
   Stop(reason:)
+}
+
+/// Stop the state machine and atomically send replies to pending callers.
+///
+/// Only `Reply(from, response)` actions are valid in the `replies` list.
+///
+pub fn stop_and_reply(
+  reason: ExitReason,
+  replies: List(Action(message, reply)),
+) -> Step(state, data, message, reply) {
+  StopAndReply(reason: reason, replies: replies)
 }
 
 /// Create a Reply action.
