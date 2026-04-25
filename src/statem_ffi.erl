@@ -7,7 +7,7 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 -behaviour(gen_statem).
 
 %% Public API
--export([do_start/8, cast/2]).
+-export([do_start/9, cast/2]).
 -export([
     reqids_new/0,
     reqids_add/3,
@@ -63,7 +63,7 @@ Start a `gen_statem` process linked to the caller and return the Subject
 needed to send messages to it
 """.
 -spec do_start(
-    InitialState, InitialData, Handler, StateEnter, TimeOut, Name, OnCodeChange, OnFormatStatus
+    InitialState, InitialData, Handler, StateEnter, TimeOut, Name, HibernateAfter, OnCodeChange, OnFormatStatus
 ) ->
     Result
 when
@@ -73,11 +73,12 @@ when
     StateEnter :: state_enter_option(),
     TimeOut :: timeout(),
     Name :: process_name_option(),
+    HibernateAfter :: none | {some, non_neg_integer()},
     OnCodeChange :: any(),
     OnFormatStatus :: any(),
     Result :: any().
 do_start(
-    InitialState, InitialData, Handler, StateEnter, Timeout, Name, OnCodeChange, OnFormatStatus
+    InitialState, InitialData, Handler, StateEnter, Timeout, Name, HibernateAfter, OnCodeChange, OnFormatStatus
 ) ->
     %% Ack channel: a unique reference the child process will use to
     %% send us the Subject it creates in init/1.
@@ -88,10 +89,17 @@ do_start(
         {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name,
             OnCodeChange, OnFormatStatus},
 
+    BaseOpts = [{timeout, Timeout}],
+    Opts =
+        case HibernateAfter of
+            none -> BaseOpts;
+            {some, Ms} -> [{hibernate_after, Ms} | BaseOpts]
+        end,
+
     StartResult =
         case Name of
             none ->
-                gen_statem:start_link(?MODULE, InitArgs, [{timeout, Timeout}]);
+                gen_statem:start_link(?MODULE, InitArgs, Opts);
             {some, ProcessName} ->
                 gen_statem:start_link(
                     %% TODO: Change this to support other formats
@@ -99,7 +107,7 @@ do_start(
                     {local, ProcessName},
                     ?MODULE,
                     InitArgs,
-                    [{timeout, Timeout}]
+                    Opts
                 )
         end,
 
