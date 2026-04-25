@@ -169,6 +169,19 @@ pub type Action(message, reply) {
   /// Set a generic named timeout
   GenericTimeout(name: String, milliseconds: Int)
 
+  /// Hibernate the process after this callback returns.
+  Hibernate
+
+  /// Conditionally postpone the current event.
+  /// `PostponeIf(True)` is equivalent to `Postpone`.
+  /// `PostponeIf(False)` explicitly opts out of postponement.
+  PostponeIf(value: Bool)
+
+  /// Inject a synthetic event with a specific event type.
+  /// Unlike `NextEvent` (always internal), this lets you inject cast,
+  /// info, or call events into the event queue.
+  InjectEvent(event_type: SyntheticEventType(reply), content: message)
+
   /// Change the gen_statem callback module to `module`.
   /// The new module receives the internal `#gleam_statem` record as its data,
   /// use only for Erlang interop with modules that understand eparch's internals.
@@ -187,6 +200,19 @@ pub type Action(message, reply) {
 pub type TimeoutType {
   StateTimeoutType
   GenericTimeoutType(name: String)
+}
+
+/// The event type used when injecting synthetic events with `inject_event`.
+///
+pub type SyntheticEventType(reply) {
+  /// Delivered as an internal event (same as `NextEvent`)
+  InternalEvent
+  /// Delivered as a cast event
+  CastEvent
+  /// Delivered as an info event
+  InfoEvent
+  /// Delivered as a call event from the given caller
+  CallEvent(from: From(reply))
 }
 
 /// Opaque reference to a caller (for replying to calls).
@@ -590,6 +616,33 @@ pub fn generic_timeout(
   milliseconds: Int,
 ) -> Action(message, reply) {
   GenericTimeout(name:, milliseconds:)
+}
+
+/// Hibernate the process after this callback returns.
+///
+pub fn hibernate() -> Action(message, reply) {
+  Hibernate
+}
+
+/// Conditionally postpone the current event.
+///
+/// `postpone_if(True)` is equivalent to `Postpone`.
+/// `postpone_if(False)` explicitly opts out of postponement.
+///
+pub fn postpone_if(value: Bool) -> Action(message, reply) {
+  PostponeIf(value: value)
+}
+
+/// Inject a synthetic event with an explicit event type.
+///
+/// Unlike `next_event` (always internal), this lets you inject cast,
+/// info, or call events into the event queue.
+///
+pub fn inject_event(
+  event_type: SyntheticEventType(reply),
+  content: message,
+) -> Action(message, reply) {
+  InjectEvent(event_type: event_type, content: content)
 }
 
 /// Create a ChangeCallbackModule action.

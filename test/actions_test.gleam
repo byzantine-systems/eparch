@@ -639,6 +639,170 @@ pub fn request_ids_add_manually_adds_to_collection_test() {
   label |> should.equal("manual")
 }
 
+// HIBERNATE
+type HibState {
+  HibActive
+}
+
+type HibMsg {
+  HibTrigger
+  HibPing(reply_with: process.Subject(String))
+}
+
+fn hibernate_handler(
+  event: state_machine.Event(HibState, HibMsg, Nil),
+  _state: HibState,
+  data: Nil,
+) -> state_machine.Step(HibState, Nil, HibMsg, Nil) {
+  case event {
+    state_machine.Info(HibTrigger) ->
+      state_machine.keep_state(data, [state_machine.hibernate()])
+
+    state_machine.Info(HibPing(reply_with: sub)) -> {
+      process.send(sub, "pong")
+      state_machine.keep_state(data, [])
+    }
+
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn hibernate_action_does_not_crash_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: HibActive, initial_data: Nil)
+    |> state_machine.on_event(hibernate_handler)
+    |> state_machine.start
+
+  process.send(machine.data, HibTrigger)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, HibPing(reply_with: reply_sub))
+  let assert Ok(r) = process.receive(reply_sub, 1000)
+  r |> should.equal("pong")
+}
+
+// POSTPONE IF
+type PifState {
+  PifWaiting
+  PifReady
+}
+
+type PifMsg {
+  PifGo
+  PifAction(reply_with: process.Subject(String))
+}
+
+fn postpone_if_handler(
+  event: state_machine.Event(PifState, PifMsg, Nil),
+  state: PifState,
+  data: Nil,
+) -> state_machine.Step(PifState, Nil, PifMsg, Nil) {
+  case event, state {
+    state_machine.Info(PifAction(_)), PifWaiting ->
+      state_machine.keep_state(data, [state_machine.postpone_if(True)])
+
+    state_machine.Info(PifGo), PifWaiting ->
+      state_machine.next_state(PifReady, data, [])
+
+    state_machine.Info(PifAction(reply_with: sub)), PifReady -> {
+      process.send(sub, "handled")
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn postpone_if_true_redelivers_event_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: PifWaiting, initial_data: Nil)
+    |> state_machine.on_event(postpone_if_handler)
+    |> state_machine.start
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, PifAction(reply_with: reply_sub))
+  process.send(machine.data, PifGo)
+
+  let assert Ok(r) = process.receive(reply_sub, 1000)
+  r |> should.equal("handled")
+}
+
+// INJECT EVENT
+type InjState {
+  InjActive
+}
+
+type InjMsg {
+  InjTrigger(reply_with: process.Subject(String))
+  InjDerived(reply_with: process.Subject(String))
+}
+
+fn inject_cast_handler(
+  event: state_machine.Event(InjState, InjMsg, Nil),
+  _state: InjState,
+  data: Nil,
+) -> state_machine.Step(InjState, Nil, InjMsg, Nil) {
+  case event {
+    state_machine.Info(InjTrigger(reply_with: sub)) ->
+      state_machine.keep_state(data, [
+        state_machine.inject_event(state_machine.CastEvent, InjDerived(sub)),
+      ])
+
+    state_machine.Cast(InjDerived(reply_with: sub)) -> {
+      process.send(sub, "cast")
+      state_machine.keep_state(data, [])
+    }
+
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn inject_event_cast_arrives_as_cast_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: InjActive, initial_data: Nil)
+    |> state_machine.on_event(inject_cast_handler)
+    |> state_machine.start
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, InjTrigger(reply_with: reply_sub))
+
+  let assert Ok(r) = process.receive(reply_sub, 1000)
+  r |> should.equal("cast")
+}
+
+fn inject_info_handler(
+  event: state_machine.Event(InjState, InjMsg, Nil),
+  _state: InjState,
+  data: Nil,
+) -> state_machine.Step(InjState, Nil, InjMsg, Nil) {
+  case event {
+    state_machine.Info(InjTrigger(reply_with: sub)) ->
+      state_machine.keep_state(data, [
+        state_machine.inject_event(state_machine.InfoEvent, InjDerived(sub)),
+      ])
+
+    state_machine.Info(InjDerived(reply_with: sub)) -> {
+      process.send(sub, "info")
+      state_machine.keep_state(data, [])
+    }
+
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn inject_event_info_arrives_as_info_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: InjActive, initial_data: Nil)
+    |> state_machine.on_event(inject_info_handler)
+    |> state_machine.start
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, InjTrigger(reply_with: reply_sub))
+
+  let assert Ok(r) = process.receive(reply_sub, 1000)
+  r |> should.equal("info")
+}
+
 // ON FORMAT STATUS
 type FmtState {
   FmtIdle
