@@ -2,10 +2,10 @@
 
 [![Package Version](https://img.shields.io/hexpm/v/eparch)](https://hex.pm/packages/eparch)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/eparch/)
-![License](https://img.shields.io/github/license/schonfinkel/eparch)
+![License](https://img.shields.io/github/license/byzantine-systems/eparch)
 
 [![Built with Nix](https://builtwithnix.org/badge.svg)](https://builtwithnix.org)
-[![[Nix] Build & Test](https://github.com/schonfinkel/eparch/actions/workflows/build.yml/badge.svg)](https://github.com/schonfinkel/eparch/actions/workflows/build.yml)
+[![[Nix] Build & Test](https://github.com/byzantine-systems/eparch/actions/workflows/build.yml/badge.svg)](https://github.com/byzantine-systems/eparch/actions/workflows/build.yml)
 
 > **EPARCH OF THE CITY (ἔπαρχος τῆς πόλεως)**, successor of the late Roman URBAN PREFECT, the governor of Constantinople. [^1]
 >

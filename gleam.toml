@@ -1,9 +1,9 @@
 name = "eparch"
-version = "0.5.0"
+version = "0.6.0"
 
 description = "Gleam-friendly types for some poweful Erlang/OTP behaviours (like gen_statem and gen_event)"
 licences = ["LGPL-3.0-or-later"]
-repository = { type = "github", user = "schonfinkel", repo = "eparch" }
+repository = { type = "github", user = "byzantine-systems", repo = "eparch" }
 # links = [{ title = "Website", href = "" }]
 
 # For a full reference of all the available options, you can have a look at
