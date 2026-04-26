@@ -479,10 +479,8 @@ convert_action_to_erlang(Action) ->
             postpone;
         hibernate ->
             hibernate;
-        {postpone_if, true} ->
+        postpone ->
             postpone;
-        {postpone_if, false} ->
-            {postpone, false};
         {next_event, internal_event, Content} ->
             {next_event, internal, Content};
         {next_event, cast_event, Content} ->
