@@ -37,6 +37,7 @@
 //// }
 //// ```
 
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
 
@@ -152,6 +153,7 @@ pub opaque type Handler(state, event) {
   Handler(
     init_state: state,
     on_event: fn(event, state) -> EventStep(state),
+    on_call: Option(Dynamic),
     on_terminate: Option(fn(state) -> Nil),
     on_format_status: Option(fn(state) -> String),
   )
@@ -200,6 +202,7 @@ pub fn new_handler(
   Handler(
     init_state: initial_state,
     on_event: handler,
+    on_call: None,
     on_terminate: None,
     on_format_status: None,
   )
@@ -244,6 +247,30 @@ pub fn on_format_status(
 ) -> Handler(state, event) {
   Handler(..handler, on_format_status: Some(formatter))
 }
+
+/// Attach a call handler to a handler, enabling async request/response via
+/// `send_request`. The `on_call` function receives the request and the current
+/// handler state, and must return a `#(reply, new_state)` tuple.
+///
+/// Without this, `send_request` calls to this handler will fail with
+/// `Error(RequestCrashed(_))`.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.new_handler(0, on_event)
+/// |> event_manager.with_call_handler(fn(GetCount, count) { #(count, count) })
+/// ```
+///
+pub fn with_call_handler(
+  handler: Handler(state, event),
+  on_call: fn(request, state) -> #(reply, state),
+) -> Handler(state, event) {
+  Handler(..handler, on_call: Some(coerce(on_call)))
+}
+
+@external(erlang, "gleam_stdlib", "identity")
+fn coerce(a: a) -> b
 
 // ---------------------------------------------------------------------------
 // StartOptions builder
@@ -507,3 +534,104 @@ pub fn sync_notify(manager: Manager(event), event: event) -> Nil {
 
 @external(erlang, "event_manager_ffi", "do_sync_notify")
 fn do_sync_notify(manager: Manager(event), event: event) -> Nil
+
+// ---------------------------------------------------------------------------
+// Async call API (OTP 23+)
+// ---------------------------------------------------------------------------
+
+/// An opaque handle for a pending async call issued by `send_request`.
+///
+/// The phantom type `reply` tracks the expected response type at compile time.
+///
+pub type RequestId(reply)
+
+/// Errors that `receive_response` and `wait_response` can return.
+///
+pub type ReceiveError {
+  /// No reply arrived within the timeout.
+  ReceiveTimeout
+  /// The manager (or handler) exited before replying. The `reason` field
+  /// carries a human-readable description of the exit reason.
+  RequestCrashed(reason: String)
+}
+
+/// The result of a non-blocking `check_response` call.
+///
+pub type CheckResponse(reply) {
+  /// A reply for the given `RequestId` was found in the mailbox.
+  CheckGotReply(reply: reply)
+  /// The message was not a reply for this `RequestId`.
+  CheckNoReply
+  /// The manager (or handler) exited before replying.
+  CheckCrashed(reason: String)
+}
+
+/// Asynchronously call a specific handler and return a `RequestId`.
+///
+/// Unlike `sync_notify`, this targets one handler by its `HandlerRef` and
+/// expects a reply. The handler must have been registered with
+/// `with_call_handler` set; otherwise `receive_response` will return
+/// `Error(RequestCrashed(_))`.
+///
+/// Use `receive_response` or `wait_response` to collect the reply later, or
+/// `check_response` to poll non-blockingly.
+///
+/// ## Example
+///
+/// ```gleam
+/// let req: event_manager.RequestId(Int) =
+///   event_manager.send_request(mgr, handler_ref, GetCount)
+/// // ... do other work ...
+/// let assert Ok(count) = event_manager.receive_response(req, 1000)
+/// ```
+///
+@external(erlang, "event_manager_ffi", "send_request")
+pub fn send_request(
+  manager: Manager(event),
+  handler_ref: HandlerRef,
+  request: request,
+) -> RequestId(reply)
+
+/// Wait up to `timeout` milliseconds for the reply to a `RequestId`.
+///
+/// Returns `Ok(reply)` on success, `Error(ReceiveTimeout)` if no reply
+/// arrives in time, or `Error(RequestCrashed(reason))` if the manager exited.
+///
+@external(erlang, "event_manager_ffi", "receive_response")
+pub fn receive_response(
+  request_id: RequestId(reply),
+  timeout: Int,
+) -> Result(reply, ReceiveError)
+
+/// Same as `receive_response`. Provided for API parity with OTP's
+/// `gen_server:wait_response/2`.
+///
+pub fn wait_response(
+  request_id: RequestId(reply),
+  timeout: Int,
+) -> Result(reply, ReceiveError) {
+  receive_response(request_id, timeout)
+}
+
+/// Non-blocking check: inspect `message` to see if it is a reply for
+/// `request_id`.
+///
+/// Useful inside a custom `process.Selector` receive loop. Pass any message
+/// you receive; if it does not belong to this request `CheckNoReply` is
+/// returned and the message is left for other handlers.
+///
+/// ## Example
+///
+/// ```gleam
+/// case event_manager.check_response(raw_msg, req) {
+///   event_manager.CheckGotReply(value) -> // handle value
+///   event_manager.CheckNoReply -> // not ours, pass it on
+///   event_manager.CheckCrashed(reason) -> // handle error
+/// }
+/// ```
+///
+@external(erlang, "event_manager_ffi", "check_response")
+pub fn check_response(
+  message: Dynamic,
+  request_id: RequestId(reply),
+) -> CheckResponse(reply)
