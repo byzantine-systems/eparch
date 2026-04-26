@@ -596,7 +596,7 @@ pub type CheckResponse(reply) {
 @external(erlang, "event_manager_ffi", "send_request")
 pub fn send_request(
   manager: Manager(event),
-  handler_ref: HandlerRef,
+  handler_ref: HandlerRef(request, reply),
   request: request,
 ) -> RequestId(reply)
 
