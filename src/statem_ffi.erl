@@ -483,16 +483,14 @@ convert_action_to_erlang(Action) ->
             postpone;
         {postpone_if, false} ->
             {postpone, false};
-        {inject_event, internal_event, Content} ->
+        {next_event, internal_event, Content} ->
             {next_event, internal, Content};
-        {inject_event, cast_event, Content} ->
+        {next_event, cast_event, Content} ->
             {next_event, cast, Content};
-        {inject_event, info_event, Content} ->
+        {next_event, info_event, Content} ->
             {next_event, info, Content};
-        {inject_event, {call_event, From}, Content} ->
+        {next_event, {call_event, From}, Content} ->
             {next_event, {call, From}, Content};
-        {next_event, Content} ->
-            {next_event, internal, Content};
         {state_timeout, Milliseconds} ->
             {state_timeout, Milliseconds, timeout};
         {generic_timeout, Name, Milliseconds} ->
