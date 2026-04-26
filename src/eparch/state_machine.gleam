@@ -628,13 +628,8 @@ pub fn hibernate() -> Action(message, reply) {
   Hibernate
 }
 
-/// Conditionally postpone the current event.
-///
-/// `postpone_if(True)` is equivalent to `Postpone`.
-/// `postpone_if(False)` explicitly opts out of postponement.
-///
-pub fn postpone_if(value: Bool) -> Action(message, reply) {
-  PostponeIf(value: value)
+pub fn postpone() -> Action(message, reply) {
+  Postpone
 }
 
 /// Inject a synthetic event with an explicit event type.
