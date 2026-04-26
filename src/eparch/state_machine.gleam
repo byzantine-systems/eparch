@@ -175,7 +175,8 @@ pub type Action(message, reply) {
   /// Conditionally postpone the current event.
   /// `PostponeIf(True)` is equivalent to `Postpone`.
   /// `PostponeIf(False)` explicitly opts out of postponement.
-  PostponeIf(value: Bool)
+  /// Postpone this event until after a state change.
+  Postpone
 
   /// Inject a synthetic event with a specific event type.
   /// Unlike `NextEvent` (always internal), this lets you inject cast,
