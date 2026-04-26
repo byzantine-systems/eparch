@@ -157,6 +157,14 @@ pub opaque type Handler(state, event) {
     on_terminate: Option(fn(state) -> Nil),
     on_format_status: Option(fn(state) -> String),
   )
+pub opaque type Handler(state, event, request, reply) {
+  Handler(
+    init_state: state,
+    on_event: fn(event, state) -> EventStep(state),
+    on_call: Option(fn(request, state) -> #(reply, state)),
+    on_terminate: Option(fn(state) -> Nil),
+    on_format_status: Option(fn(state) -> String),
+  )
 }
 
 /// An opaque reference to a specific registered handler instance.
