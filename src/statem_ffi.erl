@@ -483,6 +483,14 @@ convert_action_to_erlang(Action) ->
             {state_timeout, Milliseconds, timeout};
         {generic_timeout, Name, Milliseconds} ->
             {{timeout, Name}, Milliseconds, timeout};
+        cancel_state_timeout ->
+            {state_timeout, cancel};
+        {cancel_generic_timeout, Name} ->
+            {{timeout, Name}, cancel};
+        {update_state_timeout, Content} ->
+            {state_timeout, update, Content};
+        {update_generic_timeout, Name, Content} ->
+            {{timeout, Name}, update, Content};
         {change_callback_module, Module} ->
             {change_callback_module, Module};
         {push_callback_module, Module} ->

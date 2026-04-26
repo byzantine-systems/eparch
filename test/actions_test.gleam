@@ -293,6 +293,168 @@ pub fn generic_timeout_fires_after_interval_test() {
   s |> should.equal(GtTriggered)
 }
 
+type CstState {
+  CstIdle
+  CstActive
+  CstTimedOut
+}
+
+type CstMsg {
+  CstActivate
+  CstCancel
+  CstGetState(reply_with: process.Subject(CstState))
+}
+
+fn cancel_state_timeout_handler(
+  event: state_machine.Event(CstState, CstMsg, Nil),
+  state: CstState,
+  data: Nil,
+) -> state_machine.Step(CstState, Nil, CstMsg, Nil) {
+  case event, state {
+    state_machine.Info(CstActivate), CstIdle ->
+      state_machine.next_state(CstActive, data, [
+        state_machine.StateTimeout(5000),
+      ])
+
+    state_machine.Info(CstCancel), CstActive ->
+      state_machine.keep_state(data, [state_machine.cancel_state_timeout()])
+
+    state_machine.Timeout(state_machine.StateTimeoutType), CstActive ->
+      state_machine.next_state(CstTimedOut, data, [])
+
+    state_machine.Info(CstGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn cancel_state_timeout_prevents_fire_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: CstIdle, initial_data: Nil)
+    |> state_machine.on_event(cancel_state_timeout_handler)
+    |> state_machine.start
+
+  process.send(machine.data, CstActivate)
+  process.send(machine.data, CstCancel)
+  process.sleep(30)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, CstGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(CstActive)
+}
+
+type CgtState {
+  CgtWaiting
+  CgtTriggered
+}
+
+type CgtMsg {
+  CgtArm
+  CgtCancel
+  CgtGetState(reply_with: process.Subject(CgtState))
+}
+
+fn cancel_generic_timeout_handler(
+  event: state_machine.Event(CgtState, CgtMsg, Nil),
+  state: CgtState,
+  data: Nil,
+) -> state_machine.Step(CgtState, Nil, CgtMsg, Nil) {
+  case event, state {
+    state_machine.Info(CgtArm), CgtWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.GenericTimeout("tick", 5000),
+      ])
+
+    state_machine.Info(CgtCancel), CgtWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.cancel_generic_timeout("tick"),
+      ])
+
+    state_machine.Timeout(state_machine.GenericTimeoutType("tick")), CgtWaiting ->
+      state_machine.next_state(CgtTriggered, data, [])
+
+    state_machine.Info(CgtGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn cancel_generic_timeout_prevents_fire_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: CgtWaiting, initial_data: Nil)
+    |> state_machine.on_event(cancel_generic_timeout_handler)
+    |> state_machine.start
+
+  process.send(machine.data, CgtArm)
+  process.send(machine.data, CgtCancel)
+  process.sleep(30)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, CgtGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(CgtWaiting)
+}
+
+type UstState {
+  UstWaiting
+  UstFired
+}
+
+type UstMsg {
+  UstArm
+  UstUpdate
+  UstGetState(reply_with: process.Subject(UstState))
+}
+
+fn update_state_timeout_handler(
+  event: state_machine.Event(UstState, UstMsg, Nil),
+  state: UstState,
+  data: Nil,
+) -> state_machine.Step(UstState, Nil, UstMsg, Nil) {
+  case event, state {
+    state_machine.Info(UstArm), UstWaiting ->
+      state_machine.keep_state(data, [state_machine.StateTimeout(200)])
+
+    state_machine.Info(UstUpdate), UstWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.update_state_timeout(UstUpdate),
+      ])
+
+    state_machine.Timeout(state_machine.StateTimeoutType), UstWaiting ->
+      state_machine.next_state(UstFired, data, [])
+
+    state_machine.Info(UstGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn update_state_timeout_fires_without_restart_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: UstWaiting, initial_data: Nil)
+    |> state_machine.on_event(update_state_timeout_handler)
+    |> state_machine.start
+
+  process.send(machine.data, UstArm)
+  process.send(machine.data, UstUpdate)
+  process.sleep(300)
+
+  let reply_sub = process.new_subject()
+  process.send(machine.data, UstGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(UstFired)
+}
+
 // CAST
 //
 // 1. state_machine.cast delivers `Cast(msg)`.

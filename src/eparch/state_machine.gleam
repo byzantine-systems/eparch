@@ -169,6 +169,22 @@ pub type Action(message, reply) {
   /// Set a generic named timeout
   GenericTimeout(name: String, milliseconds: Int)
 
+  /// Cancel the running state timeout before it fires.
+  /// Since OTP 22.1.
+  CancelStateTimeout
+
+  /// Cancel a running named generic timeout before it fires.
+  /// Since OTP 22.1.
+  CancelGenericTimeout(name: String)
+
+  /// Update the payload delivered when the state timeout fires,
+  /// without restarting the timer. Since OTP 22.1.
+  UpdateStateTimeout(content: message)
+
+  /// Update the payload delivered when a named generic timeout fires,
+  /// without restarting the timer. Since OTP 22.1.
+  UpdateGenericTimeout(name: String, content: message)
+
   /// Change the gen_statem callback module to `module`.
   /// The new module receives the internal `#gleam_statem` record as its data,
   /// use only for Erlang interop with modules that understand eparch's internals.
@@ -590,6 +606,33 @@ pub fn generic_timeout(
   milliseconds: Int,
 ) -> Action(message, reply) {
   GenericTimeout(name:, milliseconds:)
+}
+
+/// Cancel the running state timeout before it fires.
+///
+pub fn cancel_state_timeout() -> Action(message, reply) {
+  CancelStateTimeout
+}
+
+/// Cancel a running named generic timeout before it fires.
+///
+pub fn cancel_generic_timeout(name: String) -> Action(message, reply) {
+  CancelGenericTimeout(name:)
+}
+
+/// Update the payload of the running state timeout without restarting the timer.
+///
+pub fn update_state_timeout(content: message) -> Action(message, reply) {
+  UpdateStateTimeout(content:)
+}
+
+/// Update the payload of a running named generic timeout without restarting the timer.
+///
+pub fn update_generic_timeout(
+  name: String,
+  content: message,
+) -> Action(message, reply) {
+  UpdateGenericTimeout(name:, content:)
 }
 
 /// Create a ChangeCallbackModule action.
