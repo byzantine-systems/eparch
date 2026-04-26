@@ -623,7 +623,7 @@ pub fn cancel_generic_timeout(name: String) -> Action(message, reply) {
 /// Update the payload of the running state timeout without restarting the timer.
 ///
 pub fn update_state_timeout(content: message) -> Action(message, reply) {
-  UpdateStateTimeout(content: content)
+  UpdateStateTimeout(content:)
 }
 
 /// Update the payload of a running named generic timeout without restarting the timer.
