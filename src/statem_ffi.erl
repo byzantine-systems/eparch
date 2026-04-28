@@ -63,7 +63,15 @@ Start a `gen_statem` process linked to the caller and return the Subject
 needed to send messages to it
 """.
 -spec do_start(
-    InitialState, InitialData, Handler, StateEnter, TimeOut, Name, HibernateAfter, OnCodeChange, OnFormatStatus
+    InitialState,
+    InitialData,
+    Handler,
+    StateEnter,
+    TimeOut,
+    Name,
+    HibernateAfter,
+    OnCodeChange,
+    OnFormatStatus
 ) ->
     Result
 when
@@ -78,7 +86,15 @@ when
     OnFormatStatus :: any(),
     Result :: any().
 do_start(
-    InitialState, InitialData, Handler, StateEnter, Timeout, Name, HibernateAfter, OnCodeChange, OnFormatStatus
+    InitialState,
+    InitialData,
+    Handler,
+    StateEnter,
+    Timeout,
+    Name,
+    HibernateAfter,
+    OnCodeChange,
+    OnFormatStatus
 ) ->
     %% Ack channel: a unique reference the child process will use to
     %% send us the Subject it creates in init/1.
