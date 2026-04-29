@@ -9,10 +9,14 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 %% Public API
 -export([do_start/9, cast/2]).
 -export([
-    stop_server/1, stop_server_with/3,
-    send_reply/2, send_replies/1,
-    wait_response/1, wait_response_timeout/2,
-    check_response/2
+    stop_server/1,
+    stop_server_with/3,
+    send_reply/2,
+    send_replies/1,
+    wait_response/1,
+    wait_response_timeout/2,
+    check_response/2,
+    receive_response_blocking/1
 ]).
 -export([
     reqids_new/0,
@@ -561,7 +565,8 @@ convert_action_to_erlang(Action) ->
             pop_callback_module
     end.
 
-subject_to_pid({subject, Pid, _Tag}) -> Pid;
+subject_to_pid({subject, Pid, _Tag}) ->
+    Pid;
 subject_to_pid({named_subject, Name}) ->
     case erlang:whereis(Name) of
         Pid when is_pid(Pid) -> Pid;
@@ -596,10 +601,12 @@ send_reply(From, Reply) ->
 
 -doc """
 Send multiple replies at once.
-Gleam's #(From, Reply) tuples are already {From, Reply} in Erlang.
+Gleam's #(From, Reply) tuples are {From, Reply} in Erlang and must be
+converted to gen_statem reply actions {reply, From, Reply}.
 """.
 send_replies(Replies) ->
-    gen_statem:reply(Replies),
+    Actions = [{reply, F, R} || {F, R} <- Replies],
+    gen_statem:reply(Actions),
     nil.
 
 -doc "Block indefinitely until a reply arrives. Since OTP 23.".
@@ -615,6 +622,13 @@ wait_response_timeout(ReqId, Timeout) ->
         {reply, Reply} -> {ok, Reply};
         timeout -> {error, receive_timeout};
         {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+    end.
+
+-doc "Block indefinitely waiting for the reply to a single ReqId. Since OTP 24.".
+receive_response_blocking(ReqId) ->
+    case gen_statem:receive_response(ReqId) of
+        {reply, Reply} -> {ok, Reply};
+        {error, {Reason, _ServerRef}} -> {error, {request_crashed, classify_reason(Reason)}}
     end.
 
 -doc """

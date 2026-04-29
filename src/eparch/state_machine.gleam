@@ -1060,6 +1060,17 @@ pub fn wait_response(
   request_id: RequestId(reply),
 ) -> Result(reply, ReceiveError)
 
+/// Block indefinitely until the reply to a `RequestId` arrives, using
+/// `gen_statem:receive_response/1`. Equivalent to `receive_response` with
+/// no timeout, complementing the timeout-bounded `receive_response/2`.
+///
+/// Requires Erlang/OTP 24 or later.
+///
+@external(erlang, "statem_ffi", "receive_response_blocking")
+pub fn receive_response_blocking(
+  request_id: RequestId(reply),
+) -> Result(reply, ReceiveError)
+
 /// Block until a reply arrives or the timeout (ms) expires.
 ///
 /// Since OTP 23.
@@ -1072,9 +1083,9 @@ pub fn wait_response_timeout(
 
 /// Check whether a received message is the reply for a `RequestId`.
 ///
-/// - `Ok(Some(reply))` — the message is the reply
-/// - `Ok(None)` — the message is unrelated to this request
-/// - `Error(ReceiveError)` — the server crashed
+/// - `Ok(Some(reply))`: the message is the reply
+/// - `Ok(None)`: the message is unrelated to this request
+/// - `Error(ReceiveError)`: the server crashed
 ///
 /// Since OTP 23.
 ///
