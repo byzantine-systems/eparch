@@ -38,6 +38,7 @@ pub opaque type Builder(state, data, message, return, reply) {
     state_enter: StateEnter,
     initialisation_timeout: Int,
     name: Option(process.Name(message)),
+    hibernate_after: Option(Int),
     on_code_change: Option(fn(data) -> data),
     on_format_status: Option(
       fn(Status(state, data, message, reply)) ->
@@ -344,6 +345,7 @@ pub fn new(
     state_enter: StateEnterDisabled,
     initialisation_timeout: 1000,
     name: None,
+    hibernate_after: None,
     on_code_change: None,
     on_format_status: None,
   )
@@ -425,6 +427,36 @@ pub fn named(
   name: process.Name(message),
 ) -> Builder(state, data, message, return, reply) {
   Builder(..builder, name: Some(name))
+}
+
+// TODO: reject negative `milliseconds` values; gen_statem requires
+// `timeout()` (0..infinity) and will crash at start otherwise.
+
+/// Configure the [`hibernate_after`](https://www.erlang.org/doc/apps/stdlib/gen_statem.html#start_link/3)
+/// start option.
+///
+/// When the state machine has been idle for at least `milliseconds`, the
+/// process hibernates (calls `proc_lib:hibernate/3`), trading a small wake-up
+/// cost for reduced memory footprint until the next event arrives. Useful for
+/// long-lived machines that spend most of their time waiting.
+///
+/// This is independent of the per-callback `Hibernate` action, which forces
+/// hibernation immediately after a single callback returns.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.hibernate_after(60_000)
+/// |> state_machine.on_event(handle_event)
+/// |> state_machine.start
+/// ```
+///
+pub fn hibernate_after(
+  builder: Builder(state, data, message, return, reply),
+  milliseconds: Int,
+) -> Builder(state, data, message, return, reply) {
+  Builder(..builder, hibernate_after: Some(milliseconds))
 }
 
 /// Provide a migration function called during hot-code upgrades.
@@ -517,6 +549,7 @@ pub fn start(
     state_enter:,
     initialisation_timeout:,
     name:,
+    hibernate_after:,
     on_code_change:,
     on_format_status:,
   ) = builder
@@ -527,6 +560,7 @@ pub fn start(
     state_enter,
     initialisation_timeout,
     name,
+    hibernate_after,
     on_code_change,
     on_format_status,
   )
@@ -541,6 +575,7 @@ fn do_start(
   state_enter: StateEnter,
   initialisation_timeout: Int,
   name: Option(process.Name(message)),
+  hibernate_after: Option(Int),
   on_code_change: Option(fn(data) -> data),
   on_format_status: Option(
     fn(Status(state, data, message, reply)) ->

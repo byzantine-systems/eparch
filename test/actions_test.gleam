@@ -18,6 +18,9 @@ import gleeunit/should
 @external(erlang, "sys", "get_status")
 fn sys_get_status(pid: process.Pid) -> Dynamic
 
+@external(erlang, "erlang", "process_info")
+fn process_info(pid: process.Pid, key: atom.Atom) -> Dynamic
+
 // STOP
 type StopState {
   StopRunning
@@ -842,6 +845,70 @@ pub fn stop_and_reply_sends_reply_before_stopping_test() {
 
   let assert Ok(down) = process.selector_receive(sel, 1000)
   down.reason |> should.equal(process.Normal)
+}
+
+// HIBERNATE AFTER
+type HibState {
+  HibIdle
+}
+
+type HibMsg {
+  HibPing(reply_with: process.Subject(String))
+}
+
+fn hibernate_after_handler(
+  event: state_machine.Event(HibState, HibMsg, Nil),
+  _state: HibState,
+  data: Nil,
+) -> state_machine.Step(HibState, Nil, HibMsg, Nil) {
+  case event {
+    state_machine.Info(HibPing(reply_with: reply_sub)) -> {
+      process.send(reply_sub, "pong")
+      state_machine.keep_state(data, [])
+    }
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+// Configures a 10ms timer, sleeps 50ms, checks process_info(pid, current_function) 
+// reports gen_statem:loop_hibernate/3, then verifies the machine still responds
+// to a message after waking.
+pub fn hibernate_after_puts_idle_process_into_hibernation_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: HibIdle, initial_data: Nil)
+    |> state_machine.hibernate_after(10)
+    |> state_machine.on_event(hibernate_after_handler)
+    |> state_machine.start
+
+  // Wait long enough for the idle timer to fire. When hibernating, the
+  // process's current_function is gen_statem:loop_hibernate/3.
+  process.sleep(50)
+
+  let info = process_info(machine.pid, atom.create("current_function"))
+  string.inspect(info)
+  |> string.contains("Hibernate")
+  |> should.equal(True)
+
+  // Sending a message wakes the process; the handler still runs.
+  let reply_sub = process.new_subject()
+  process.send(machine.data, HibPing(reply_with: reply_sub))
+  let assert Ok(reply) = process.receive(reply_sub, 1000)
+  reply |> should.equal("pong")
+}
+
+// Negative control confirming the option is actually doing the work.
+pub fn machine_without_hibernate_after_does_not_hibernate_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: HibIdle, initial_data: Nil)
+    |> state_machine.on_event(hibernate_after_handler)
+    |> state_machine.start
+
+  process.sleep(50)
+
+  let info = process_info(machine.pid, atom.create("current_function"))
+  string.inspect(info)
+  |> string.contains("Hibernate")
+  |> should.equal(False)
 }
 
 // ON FORMAT STATUS
