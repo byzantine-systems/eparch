@@ -149,14 +149,6 @@ pub type RemoveError {
 /// Create one with `new_handler/2` and optionally extend it with
 /// `on_terminate/2` and `on_format_status/2`.
 ///
-pub opaque type Handler(state, event) {
-  Handler(
-    init_state: state,
-    on_event: fn(event, state) -> EventStep(state),
-    on_call: Option(Dynamic),
-    on_terminate: Option(fn(state) -> Nil),
-    on_format_status: Option(fn(state) -> String),
-  )
 pub opaque type Handler(state, event, request, reply) {
   Handler(
     init_state: state,
