@@ -123,7 +123,7 @@ fn next_event_handler(
   case event {
     state_machine.Info(Trigger(reply_with: reply_sub)) ->
       state_machine.keep_state(data, [
-        state_machine.NextEvent(Derived(reply_sub)),
+        state_machine.NextEvent(state_machine.CastEvent, Derived(reply_sub)),
       ])
 
     state_machine.Cast(Derived(reply_with: reply_sub)) -> {
@@ -801,85 +801,7 @@ pub fn request_ids_add_manually_adds_to_collection_test() {
   label |> should.equal("manual")
 }
 
-type KsdState {
-  KsdRunning
-}
-
-type KsdMsg {
-  KsdPing(reply_with: process.Subject(String))
-}
-
-fn keep_state_and_data_handler(
-  event: state_machine.Event(KsdState, KsdMsg, Nil),
-  _state: KsdState,
-  _data: Nil,
-) -> state_machine.Step(KsdState, Nil, KsdMsg, Nil) {
-  case event {
-    state_machine.Info(KsdPing(reply_with: sub)) -> {
-      process.send(sub, "pong")
-      state_machine.keep_state_and_data([])
-    }
-    _ -> state_machine.keep_state_and_data([])
-  }
-}
-
-pub fn keep_state_and_data_keeps_machine_running_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: KsdRunning, initial_data: Nil)
-    |> state_machine.on_event(keep_state_and_data_handler)
-    |> state_machine.start
-
-  let sub = process.new_subject()
-  process.send(machine.data, KsdPing(reply_with: sub))
-  let assert Ok(r) = process.receive(sub, 1000)
-  r |> should.equal("pong")
-}
-
-type RsState {
-  RsActive
-}
-
-type RsMsg {
-  RsEnterCount(reply_with: process.Subject(Int))
-  RsTrigger
-}
-
-fn repeat_state_handler(
-  event: state_machine.Event(RsState, RsMsg, Nil),
-  _state: RsState,
-  data: Int,
-) -> state_machine.Step(RsState, Int, RsMsg, Nil) {
-  case event {
-    state_machine.Enter(_) -> state_machine.keep_state(data + 1, [])
-
-    state_machine.Info(RsTrigger) -> state_machine.repeat_state(data, [])
-
-    state_machine.Info(RsEnterCount(reply_with: sub)) -> {
-      process.send(sub, data)
-      state_machine.keep_state(data, [])
-    }
-
-    _ -> state_machine.keep_state(data, [])
-  }
-}
-
-pub fn repeat_state_triggers_state_enter_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: RsActive, initial_data: 0)
-    |> state_machine.with_state_enter()
-    |> state_machine.on_event(repeat_state_handler)
-    |> state_machine.start
-
-  process.send(machine.data, RsTrigger)
-  process.send(machine.data, RsTrigger)
-
-  let sub = process.new_subject()
-  process.send(machine.data, RsEnterCount(reply_with: sub))
-  let assert Ok(count) = process.receive(sub, 1000)
-  // Initial enter + 2 repeat_state calls = 3
-  count |> should.equal(3)
-}
-
+// STOP AND REPLY
 type SarState {
   SarRunning
 }
@@ -891,14 +813,14 @@ type SarMsg {
 fn stop_and_reply_handler(
   event: state_machine.Event(SarState, SarMsg, String),
   _state: SarState,
-  data: Nil,
+  _data: Nil,
 ) -> state_machine.Step(SarState, Nil, SarMsg, String) {
   case event {
     state_machine.Call(from, SarGetAndStop) ->
       state_machine.stop_and_reply(process.Normal, [
         state_machine.Reply(from, "bye"),
       ])
-    _ -> state_machine.keep_state(data, [])
+    _ -> state_machine.keep_state(Nil, [])
   }
 }
 

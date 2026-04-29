@@ -499,10 +499,18 @@ convert_action_to_erlang(Action) ->
             %% Reply to a gen_statem:call caller.
             %% From is the external type, the raw gen_statem:from() term.
             {reply, From, Response};
+        hibernate ->
+            hibernate;
         postpone ->
             postpone;
-        {next_event, Content} ->
+        {next_event, internal_event, Content} ->
             {next_event, internal, Content};
+        {next_event, cast_event, Content} ->
+            {next_event, cast, Content};
+        {next_event, info_event, Content} ->
+            {next_event, info, Content};
+        {next_event, {call_event, From}, Content} ->
+            {next_event, {call, From}, Content};
         {state_timeout, Milliseconds} ->
             {state_timeout, Milliseconds, timeout};
         {generic_timeout, Name, Milliseconds} ->

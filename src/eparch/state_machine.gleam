@@ -175,13 +175,18 @@ pub type Action(message, reply) {
   Postpone
 
   /// Insert a new event at the front of the queue
-  NextEvent(content: message)
+  /// Inject a synthetic event of any kind that gen_statem accepts.
+  /// Mirrors gen_statem:event_type/0.
+  NextEvent(event_type: NextEventType(reply), content: message)
 
   /// Set a state timeout (canceled on state change)
   StateTimeout(milliseconds: Int)
 
   /// Set a generic named timeout
   GenericTimeout(name: String, milliseconds: Int)
+
+  /// Hibernate the process after this callback returns.
+  Hibernate
 
   /// Cancel the running state timeout before it fires.
   /// Since OTP 22.1.
@@ -217,6 +222,20 @@ pub type Action(message, reply) {
 pub type TimeoutType {
   StateTimeoutType
   GenericTimeoutType(name: String)
+}
+
+/// Mirrors gen_statem's event_type/0 so a single NextEvent can inject any
+/// kind of synthetic event into the state machine.
+/// https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:event_type/0
+pub type NextEventType(reply) {
+  /// Delivered as an internal event
+  InternalEvent
+  /// Delivered as a cast event
+  CastEvent
+  /// Delivered as an info event
+  InfoEvent
+  /// Delivered as a call event from the given caller
+  CallEvent(from: From(reply))
 }
 
 /// Opaque reference to a caller (for replying to calls).
@@ -635,12 +654,21 @@ pub fn postpone() -> Action(message, reply) {
   Postpone
 }
 
+/// Hibernate the process after this callback returns.
+///
+pub fn hibernate() -> Action(message, reply) {
+  Hibernate
+}
+
 /// Create a NextEvent action.
 ///
 /// Inserts a new event at the front of the event queue.
 ///
-pub fn next_event(content: message) -> Action(message, reply) {
-  NextEvent(content:)
+pub fn next_event(
+  event_type: NextEventType(reply),
+  content: message,
+) -> Action(message, reply) {
+  NextEvent(event_type:, content:)
 }
 
 /// Create a StateTimeout action.
