@@ -123,7 +123,7 @@ fn next_event_handler(
   case event {
     state_machine.Info(Trigger(reply_with: reply_sub)) ->
       state_machine.keep_state(data, [
-        state_machine.NextEvent(Derived(reply_sub)),
+        state_machine.NextEvent(state_machine.CastEvent, Derived(reply_sub)),
       ])
 
     state_machine.Cast(Derived(reply_with: reply_sub)) -> {
@@ -799,6 +799,29 @@ pub fn request_ids_add_manually_adds_to_collection_test() {
     )
   value |> should.equal(7)
   label |> should.equal("manual")
+}
+
+// STOP AND REPLY
+type SarState {
+  SarRunning
+}
+
+type SarMsg {
+  SarGetAndStop
+}
+
+fn stop_and_reply_handler(
+  event: state_machine.Event(SarState, SarMsg, String),
+  _state: SarState,
+  _data: Nil,
+) -> state_machine.Step(SarState, Nil, SarMsg, String) {
+  case event {
+    state_machine.Call(from, SarGetAndStop) ->
+      state_machine.stop_and_reply(process.Normal, [
+        state_machine.Reply(from, "bye"),
+      ])
+    _ -> state_machine.keep_state(Nil, [])
+  }
 }
 
 pub fn stop_and_reply_sends_reply_before_stopping_test() {

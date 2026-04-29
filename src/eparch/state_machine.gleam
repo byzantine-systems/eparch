@@ -188,12 +188,6 @@ pub type Action(message, reply) {
   /// Hibernate the process after this callback returns.
   Hibernate
 
-  /// Conditionally postpone the current event.
-  /// `PostponeIf(True)` is equivalent to `Postpone`.
-  /// `PostponeIf(False)` explicitly opts out of postponement.
-  /// Postpone this event until after a state change.
-  Postpone
-
   /// Cancel the running state timeout before it fires.
   /// Since OTP 22.1.
   CancelStateTimeout
@@ -664,10 +658,6 @@ pub fn postpone() -> Action(message, reply) {
 ///
 pub fn hibernate() -> Action(message, reply) {
   Hibernate
-}
-
-pub fn postpone() -> Action(message, reply) {
-  Postpone
 }
 
 /// Create a NextEvent action.
