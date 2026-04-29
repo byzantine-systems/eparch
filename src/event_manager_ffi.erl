@@ -28,7 +28,10 @@ every installed instance distinguishable.
     do_remove_handler/2,
     do_which_handlers/1,
     do_notify/2,
-    do_sync_notify/2
+    do_sync_notify/2,
+    send_request/3,
+    receive_response/2,
+    check_response/2
 ]).
 
 %% gen_event handler callbacks
@@ -52,6 +55,8 @@ every installed instance distinguishable.
     gleam_state,
     % fn(event, state) -> EventStep
     on_event,
+    % none | {some, fn(request, state) -> {reply, new_state}}
+    on_call,
     % none | {some, fn(state) -> nil}
     on_terminate,
     % none | {some, fn(state) -> binary()}
@@ -275,11 +280,12 @@ level as a 5-tuple:
 We unpack it here and store the fields alongside the unique Ref in a
 `#gleam_handler{}` record.
 """.
-init({{handler, InitState, OnEvent, OnTerminate, OnFormatStatus}, Ref}) ->
+init({{handler, InitState, OnEvent, OnCall, OnTerminate, OnFormatStatus}, Ref}) ->
     State = #gleam_handler{
         ref = Ref,
         gleam_state = InitState,
         on_event = OnEvent,
+        on_call = OnCall,
         on_terminate = OnTerminate,
         on_format_status = OnFormatStatus
     },
@@ -317,11 +323,19 @@ handle_info(Info, #gleam_handler{on_event = OnEvent, gleam_state = GleamState} =
 -doc """
 Synchronous call to a specific handler via `gen_event:call/3,4`.
 
-Not exposed in the Gleam API (users embed `Subject(reply)` in their event type
-instead), but must be implemented to satisfy the gen_event behaviour.
+When the handler was registered with `with_call_handler`, the `on_call`
+function is invoked with the request and the current Gleam state; the returned
+`{Reply, NewState}` tuple is used to update the handler and reply to the
+caller. Handlers without `on_call` return `{error, not_supported}`.
 """.
-handle_call(_Request, State) ->
-    {ok, {error, not_supported}, State}.
+handle_call(Request, #gleam_handler{on_call = OnCall, gleam_state = GleamState} = State) ->
+    case OnCall of
+        none ->
+            {ok, {gleam_call_error, not_supported}, State};
+        {some, F} ->
+            {Reply, NewGleamState} = F(Request, GleamState),
+            {ok, {gleam_call_ok, Reply}, State#gleam_handler{gleam_state = NewGleamState}}
+    end.
 
 -doc """
 Handler teardown.
@@ -366,4 +380,70 @@ format_status(
             Status;
         {some, Fun} ->
             Status#{state => Fun(GleamState)}
+    end.
+
+%%%===================================================================
+%%% Async call API — OTP 23+ style
+%%%===================================================================
+
+-doc """
+Asynchronously call a specific handler and return a request reference.
+
+Spawns a lightweight helper process that calls `gen_event:call/4` (with a
+5-second hard timeout) and sends the result back to the caller tagged with a
+unique reference. Use `receive_response/2` or `check_response/2` to collect
+the reply.
+""".
+send_request(Manager, HandlerId, Request) ->
+    ReqRef = make_ref(),
+    Caller = self(),
+    spawn(fun() ->
+        Mon = erlang:monitor(process, Manager),
+        try
+            case gen_event:call(Manager, HandlerId, Request, 5000) of
+                {gleam_call_ok, Reply} ->
+                    erlang:demonitor(Mon, [flush]),
+                    Caller ! {gleam_event_call_reply, ReqRef, {ok, Reply}};
+                {gleam_call_error, Reason} ->
+                    erlang:demonitor(Mon, [flush]),
+                    Caller ! {gleam_event_call_reply, ReqRef, {error, Reason}}
+            end
+        catch
+            exit:ExitReason ->
+                erlang:demonitor(Mon, [flush]),
+                Caller ! {gleam_event_call_reply, ReqRef, {error, ExitReason}}
+        end
+    end),
+    ReqRef.
+
+-doc """
+Block up to `Timeout` milliseconds for the reply to `ReqRef`.
+
+Returns `{ok, Reply}` on success, `{error, receive_timeout}` on timeout, or
+`{error, {request_crashed, Reason}}` if the manager exited before replying.
+""".
+receive_response(ReqRef, Timeout) ->
+    receive
+        {gleam_event_call_reply, ReqRef, {ok, Reply}} ->
+            {ok, Reply};
+        {gleam_event_call_reply, ReqRef, {error, Reason}} ->
+            {error, {request_crashed, format_reason(Reason)}}
+    after Timeout ->
+        {error, receive_timeout}
+    end.
+
+-doc """
+Non-blocking check: test whether `Msg` is a reply for `ReqRef`.
+
+Returns `{check_got_reply, Reply}`, `{check_crashed, Reason}`, or
+`check_no_reply` if the message belongs to a different request.
+""".
+check_response(Msg, ReqRef) ->
+    case Msg of
+        {gleam_event_call_reply, ReqRef, {ok, Reply}} ->
+            {check_got_reply, Reply};
+        {gleam_event_call_reply, ReqRef, {error, Reason}} ->
+            {check_crashed, format_reason(Reason)};
+        _ ->
+            check_no_reply
     end.

@@ -407,5 +407,160 @@ pub fn start_monitor_accepts_option_passthrough_test() {
 
   let assert Ok(monitored) = event_manager.start_monitor(options)
 
+  // Consume the DOWN message produced when the manager stops so it does not
+  // linger in the mailbox and interfere with later tests.
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(monitored.monitor, fn(down) { down })
+
   event_manager.stop(monitored.manager)
+
+  let assert Ok(_down) = process.selector_receive(from: selector, within: 1000)
+}
+
+// ---------------------------------------------------------------------------
+// SEND_REQUEST / ASYNC CALL (OTP 23+)
+//
+// send_request targets a specific handler via its HandlerRef.  The handler
+// must be registered with `with_call_handler`; otherwise receive_response
+// returns Error(RequestCrashed(_)).
+// ---------------------------------------------------------------------------
+
+type CallMsg {
+  GetCount
+  IncrCount
+}
+
+pub fn send_request_returns_reply_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let handler =
+    event_manager.new_handler(0, fn(event, count) {
+      case event {
+        IncrCount -> event_manager.Continue(count + 1)
+        _ -> event_manager.Continue(count)
+      }
+    })
+    |> event_manager.with_call_handler(fn(request, count) {
+      case request {
+        GetCount -> #(count, count)
+        _ -> #(count, count)
+      }
+    })
+
+  let assert Ok(ref) = event_manager.add_handler(mgr, handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, GetCount)
+  let assert Ok(count) = event_manager.receive_response(req, 1000)
+  count |> should.equal(0)
+
+  event_manager.stop(mgr)
+}
+
+pub fn send_request_sees_latest_handler_state_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let handler =
+    event_manager.new_handler(0, fn(event, count) {
+      case event {
+        IncrCount -> event_manager.Continue(count + 1)
+        _ -> event_manager.Continue(count)
+      }
+    })
+    |> event_manager.with_call_handler(fn(request, count) {
+      case request {
+        GetCount -> #(count, count)
+        _ -> #(count, count)
+      }
+    })
+
+  let assert Ok(ref) = event_manager.add_handler(mgr, handler)
+
+  event_manager.sync_notify(mgr, IncrCount)
+  event_manager.sync_notify(mgr, IncrCount)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, GetCount)
+  let assert Ok(count) = event_manager.receive_response(req, 1000)
+  count |> should.equal(2)
+
+  event_manager.stop(mgr)
+}
+
+pub fn wait_response_returns_same_reply_as_receive_response_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let handler =
+    event_manager.new_handler(42, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+    |> event_manager.with_call_handler(fn(_request, state) { #(state, state) })
+
+  let assert Ok(ref) = event_manager.add_handler(mgr, handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, GetCount)
+  let assert Ok(value) = event_manager.wait_response(req, 1000)
+  value |> should.equal(42)
+
+  event_manager.stop(mgr)
+}
+
+pub fn check_response_returns_check_no_reply_for_unrelated_message_test() {
+  let assert Ok(mgr) = event_manager.start()
+
+  let handler =
+    event_manager.new_handler(0, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+    |> event_manager.with_call_handler(fn(_req, state) { #(state, state) })
+
+  let assert Ok(ref) = event_manager.add_handler(mgr, handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, GetCount)
+
+  // An unrelated dynamic value should not match.
+  let unrelated = dynamic.int(42)
+  event_manager.check_response(unrelated, req)
+  |> should.equal(event_manager.CheckNoReply)
+
+  // Drain the real reply so the process stays clean.
+  let _ = event_manager.receive_response(req, 1000)
+
+  event_manager.stop(mgr)
+}
+
+pub fn check_response_returns_check_got_reply_when_message_matches_test() {
+  // Discard any stale messages (e.g. unconsumed DOWN messages from earlier
+  // tests) so that the select_other catch-all below doesn't capture them.
+  process.flush_messages()
+
+  let assert Ok(mgr) = event_manager.start()
+
+  let handler =
+    event_manager.new_handler(7, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+    |> event_manager.with_call_handler(fn(_req, state) { #(state, state) })
+
+  let assert Ok(ref) = event_manager.add_handler(mgr, handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, GetCount)
+
+  // Receive the raw reply message from the mailbox via select_other, then
+  // hand it to check_response.
+  let selector =
+    process.new_selector()
+    |> process.select_other(fn(msg) { msg })
+  let assert Ok(raw) = process.selector_receive(from: selector, within: 1000)
+
+  case event_manager.check_response(raw, req) {
+    event_manager.CheckGotReply(value) -> value |> should.equal(7)
+    _ -> should.fail()
+  }
+
+  event_manager.stop(mgr)
 }

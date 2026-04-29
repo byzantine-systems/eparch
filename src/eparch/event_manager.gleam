@@ -37,6 +37,7 @@
 //// }
 //// ```
 
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
 
@@ -125,20 +126,20 @@ pub type MonitoredManager(event) {
 }
 
 /// Errors that can occur when adding a handler.
-pub type AddError {
+pub type AddError(request, reply) {
   /// A handler with the same identity is already registered. The field
   /// carries the `HandlerRef` that caused the collision.
-  HandlerAlreadyExists(handler_ref: HandlerRef)
+  HandlerAlreadyExists(handler_ref: HandlerRef(request, reply))
   /// The handler's initialisation failed. `reason` is a human-readable
   /// string produced from the raw Erlang error term.
   InitFailed(reason: String)
 }
 
 /// Errors that can occur when removing a handler.
-pub type RemoveError {
+pub type RemoveError(request, reply) {
   /// No handler with the given ref is currently registered. The field
   /// carries the `HandlerRef` the caller supplied.
-  HandlerNotFound(handler_ref: HandlerRef)
+  HandlerNotFound(handler_ref: HandlerRef(request, reply))
   /// Removal failed for another reason.
   RemoveFailed(reason: String)
 }
@@ -148,10 +149,11 @@ pub type RemoveError {
 /// Create one with `new_handler/2` and optionally extend it with
 /// `on_terminate/2` and `on_format_status/2`.
 ///
-pub opaque type Handler(state, event) {
+pub opaque type Handler(state, event, request, reply) {
   Handler(
     init_state: state,
     on_event: fn(event, state) -> EventStep(state),
+    on_call: Option(fn(request, state) -> #(reply, state)),
     on_terminate: Option(fn(state) -> Nil),
     on_format_status: Option(fn(state) -> String),
   )
@@ -163,7 +165,11 @@ pub opaque type Handler(state, event) {
 /// `add_supervised_handler`. Pass them to `remove_handler` to unregister a
 /// specific handler, or compare them with values returned by `which_handlers`.
 ///
-pub type HandlerRef
+/// The phantom `request`/`reply` parameters track the call protocol of the
+/// handler, so `send_request` cannot be called with a mismatched request type.
+/// Handlers without a call protocol carry `Nil`/`Nil`.
+///
+pub type HandlerRef(request, reply)
 
 /// An opaque reference to a running event manager process.
 ///
@@ -194,12 +200,13 @@ pub type Manager(event)
 /// ```
 ///
 pub fn new_handler(
-  initial_state initial_state: state,
-  on_event handler: fn(event, state) -> EventStep(state),
-) -> Handler(state, event) {
+  initial_state: state,
+  handler: fn(event, state) -> EventStep(state),
+) -> Handler(state, event, Nil, Nil) {
   Handler(
     init_state: initial_state,
     on_event: handler,
+    on_call: None,
     on_terminate: None,
     on_format_status: None,
   )
@@ -216,9 +223,9 @@ pub fn new_handler(
 /// ```
 ///
 pub fn on_terminate(
-  handler: Handler(state, event),
+  handler: Handler(state, event, _, _),
   cleanup: fn(state) -> Nil,
-) -> Handler(state, event) {
+) -> Handler(state, event, _, _) {
   Handler(..handler, on_terminate: Some(cleanup))
 }
 
@@ -239,10 +246,31 @@ pub fn on_terminate(
 /// ```
 ///
 pub fn on_format_status(
-  handler: Handler(state, event),
+  handler: Handler(state, event, _, _),
   formatter: fn(state) -> String,
-) -> Handler(state, event) {
+) -> Handler(state, event, _, _) {
   Handler(..handler, on_format_status: Some(formatter))
+}
+
+/// Attach a call handler to a handler, enabling async request/response via
+/// `send_request`. The `on_call` function receives the request and the current
+/// handler state, and must return a `#(reply, new_state)` tuple.
+///
+/// Without this, `send_request` calls to this handler will fail with
+/// `Error(RequestCrashed(_))`.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.new_handler(0, on_event)
+/// |> event_manager.with_call_handler(fn(GetCount, count) { #(count, count) })
+/// ```
+///
+pub fn with_call_handler(
+  handler: Handler(state, event, _, _),
+  on_call: fn(request, state) -> #(reply, state),
+) -> Handler(state, event, request, reply) {
+  Handler(..handler, on_call: Some(on_call))
 }
 
 // ---------------------------------------------------------------------------
@@ -415,16 +443,16 @@ fn do_manager_pid(manager: Manager(event)) -> Pid
 ///
 pub fn add_handler(
   manager: Manager(event),
-  handler: Handler(state, event),
-) -> Result(HandlerRef, AddError) {
+  handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), AddError(request, reply)) {
   do_add_handler(manager, handler)
 }
 
 @external(erlang, "event_manager_ffi", "do_add_handler")
 fn do_add_handler(
   manager: Manager(event),
-  handler: Handler(state, event),
-) -> Result(HandlerRef, AddError)
+  handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), AddError(request, reply))
 
 /// Register a supervised handler with the event manager.
 ///
@@ -442,16 +470,16 @@ fn do_add_handler(
 ///
 pub fn add_supervised_handler(
   manager: Manager(event),
-  handler: Handler(state, event),
-) -> Result(HandlerRef, AddError) {
+  handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), AddError(request, reply)) {
   do_add_supervised_handler(manager, handler)
 }
 
 @external(erlang, "event_manager_ffi", "do_add_sup_handler")
 fn do_add_supervised_handler(
   manager: Manager(event),
-  handler: Handler(state, event),
-) -> Result(HandlerRef, AddError)
+  handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), AddError(request, reply))
 
 /// Remove a specific handler from the event manager.
 ///
@@ -459,25 +487,29 @@ fn do_add_supervised_handler(
 ///
 pub fn remove_handler(
   manager: Manager(event),
-  handler_ref: HandlerRef,
-) -> Result(Nil, RemoveError) {
+  handler_ref: HandlerRef(request, reply),
+) -> Result(Nil, RemoveError(request, reply)) {
   do_remove_handler(manager, handler_ref)
 }
 
 @external(erlang, "event_manager_ffi", "do_remove_handler")
 fn do_remove_handler(
   manager: Manager(event),
-  handler_ref: HandlerRef,
-) -> Result(Nil, RemoveError)
+  handler_ref: HandlerRef(request, reply),
+) -> Result(Nil, RemoveError(request, reply))
 
 /// Return the list of `HandlerRef`s for all currently registered handlers.
 ///
-pub fn which_handlers(manager: Manager(event)) -> List(HandlerRef) {
+pub fn which_handlers(
+  manager: Manager(event),
+) -> List(HandlerRef(request, reply)) {
   do_which_handlers(manager)
 }
 
 @external(erlang, "event_manager_ffi", "do_which_handlers")
-fn do_which_handlers(manager: Manager(event)) -> List(HandlerRef)
+fn do_which_handlers(
+  manager: Manager(event),
+) -> List(HandlerRef(request, reply))
 
 // ---------------------------------------------------------------------------
 // Notifications
@@ -507,3 +539,104 @@ pub fn sync_notify(manager: Manager(event), event: event) -> Nil {
 
 @external(erlang, "event_manager_ffi", "do_sync_notify")
 fn do_sync_notify(manager: Manager(event), event: event) -> Nil
+
+// ---------------------------------------------------------------------------
+// Async call API (OTP 23+)
+// ---------------------------------------------------------------------------
+
+/// An opaque handle for a pending async call issued by `send_request`.
+///
+/// The phantom type `reply` tracks the expected response type at compile time.
+///
+pub type RequestId(reply)
+
+/// Errors that `receive_response` and `wait_response` can return.
+///
+pub type ReceiveError {
+  /// No reply arrived within the timeout.
+  ReceiveTimeout
+  /// The manager (or handler) exited before replying. The `reason` field
+  /// carries a human-readable description of the exit reason.
+  RequestCrashed(reason: String)
+}
+
+/// The result of a non-blocking `check_response` call.
+///
+pub type CheckResponse(reply) {
+  /// A reply for the given `RequestId` was found in the mailbox.
+  CheckGotReply(reply: reply)
+  /// The message was not a reply for this `RequestId`.
+  CheckNoReply
+  /// The manager (or handler) exited before replying.
+  CheckCrashed(reason: String)
+}
+
+/// Asynchronously call a specific handler and return a `RequestId`.
+///
+/// Unlike `sync_notify`, this targets one handler by its `HandlerRef` and
+/// expects a reply. The handler must have been registered with
+/// `with_call_handler` set; otherwise `receive_response` will return
+/// `Error(RequestCrashed(_))`.
+///
+/// Use `receive_response` or `wait_response` to collect the reply later, or
+/// `check_response` to poll non-blockingly.
+///
+/// ## Example
+///
+/// ```gleam
+/// let req: event_manager.RequestId(Int) =
+///   event_manager.send_request(mgr, handler_ref, GetCount)
+/// // ... do other work ...
+/// let assert Ok(count) = event_manager.receive_response(req, 1000)
+/// ```
+///
+@external(erlang, "event_manager_ffi", "send_request")
+pub fn send_request(
+  manager: Manager(event),
+  handler_ref: HandlerRef(request, reply),
+  request: request,
+) -> RequestId(reply)
+
+/// Wait up to `timeout` milliseconds for the reply to a `RequestId`.
+///
+/// Returns `Ok(reply)` on success, `Error(ReceiveTimeout)` if no reply
+/// arrives in time, or `Error(RequestCrashed(reason))` if the manager exited.
+///
+@external(erlang, "event_manager_ffi", "receive_response")
+pub fn receive_response(
+  request_id: RequestId(reply),
+  timeout: Int,
+) -> Result(reply, ReceiveError)
+
+/// Same as `receive_response`. Provided for API parity with OTP's
+/// `gen_server:wait_response/2`.
+///
+pub fn wait_response(
+  request_id: RequestId(reply),
+  timeout: Int,
+) -> Result(reply, ReceiveError) {
+  receive_response(request_id, timeout)
+}
+
+/// Non-blocking check: inspect `message` to see if it is a reply for
+/// `request_id`.
+///
+/// Useful inside a custom `process.Selector` receive loop. Pass any message
+/// you receive; if it does not belong to this request `CheckNoReply` is
+/// returned and the message is left for other handlers.
+///
+/// ## Example
+///
+/// ```gleam
+/// case event_manager.check_response(raw_msg, req) {
+///   event_manager.CheckGotReply(value) -> // handle value
+///   event_manager.CheckNoReply -> // not ours, pass it on
+///   event_manager.CheckCrashed(reason) -> // handle error
+/// }
+/// ```
+///
+@external(erlang, "event_manager_ffi", "check_response")
+pub fn check_response(
+  message: Dynamic,
+  request_id: RequestId(reply),
+) -> CheckResponse(reply)
