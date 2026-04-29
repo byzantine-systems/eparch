@@ -196,17 +196,6 @@ pub type Manager(event)
 /// ```
 ///
 pub fn new_handler(
-  initial_state initial_state: state,
-  on_event handler: fn(event, state) -> EventStep(state),
-) -> Handler(state, event) {
-  Handler(
-    init_state: initial_state,
-    on_event: handler,
-    on_call: None,
-    on_terminate: None,
-    on_format_status: None,
-  )
-pub fn new_handler(
   initial_state: state,
   handler: fn(event, state) -> EventStep(state),
 ) -> Handler(state, event, Nil, Nil) {
@@ -230,9 +219,9 @@ pub fn new_handler(
 /// ```
 ///
 pub fn on_terminate(
-  handler: Handler(state, event),
+  handler: Handler(state, event, _, _),
   cleanup: fn(state) -> Nil,
-) -> Handler(state, event) {
+) -> Handler(state, event, _, _) {
   Handler(..handler, on_terminate: Some(cleanup))
 }
 
@@ -253,9 +242,9 @@ pub fn on_terminate(
 /// ```
 ///
 pub fn on_format_status(
-  handler: Handler(state, event),
+  handler: Handler(state, event, _, _),
   formatter: fn(state) -> String,
-) -> Handler(state, event) {
+) -> Handler(state, event, _, _) {
   Handler(..handler, on_format_status: Some(formatter))
 }
 
@@ -279,9 +268,6 @@ pub fn with_call_handler(
 ) -> Handler(state, event, request, reply) {
   Handler(..handler, on_call: Some(on_call))
 }
-
-@external(erlang, "gleam_stdlib", "identity")
-fn coerce(a: a) -> b
 
 // ---------------------------------------------------------------------------
 // StartOptions builder
