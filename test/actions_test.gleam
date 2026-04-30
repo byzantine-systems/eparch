@@ -6,6 +6,7 @@
 //// name collisions across sections.
 ////
 
+import eparch/start_options
 import eparch/state_machine
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
@@ -21,6 +22,16 @@ fn sys_get_status(pid: process.Pid) -> Dynamic
 
 @external(erlang, "erlang", "process_info")
 fn process_info(pid: process.Pid, key: atom.Atom) -> Dynamic
+
+/// Test helper: extract the underlying Subject from a Started machine.
+/// Tests in this module only use unnamed and Local-named starts, so this
+/// always succeeds; the assertion documents that assumption.
+fn subject_of(
+  machine: state_machine.Started(message),
+) -> process.Subject(message) {
+  let assert Ok(s) = state_machine.ref_to_subject(machine.ref)
+  s
+}
 
 // STOP
 type StopState {
@@ -46,14 +57,14 @@ pub fn stop_normal_terminates_process_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: StopRunning, initial_data: Nil)
     |> state_machine.on_event(stop_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let monitor = process.monitor(machine.pid)
   let selector =
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(down) { down })
 
-  process.send(machine.data, Shutdown)
+  process.send(subject_of(machine), Shutdown)
 
   let assert Ok(down) = process.selector_receive(selector, 1000)
   down.reason |> should.equal(process.Normal)
@@ -95,12 +106,12 @@ pub fn postpone_redelivers_event_after_state_change_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: PostWaiting, initial_data: Nil)
     |> state_machine.on_event(postpone_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let reply_sub = process.new_subject()
   // Action arrives first but is postponed; Go triggers state change -> redeliver.
-  process.send(machine.data, Action(reply_with: reply_sub))
-  process.send(machine.data, Go)
+  process.send(subject_of(machine), Action(reply_with: reply_sub))
+  process.send(subject_of(machine), Go)
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("handled")
@@ -143,10 +154,10 @@ pub fn next_event_fires_synthesised_cast_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: NeActive, initial_data: Nil)
     |> state_machine.on_event(next_event_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, Trigger(reply_with: reply_sub))
+  process.send(subject_of(machine), Trigger(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("derived")
@@ -189,13 +200,13 @@ pub fn state_timeout_fires_and_transitions_state_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: StIdle, initial_data: Nil)
     |> state_machine.on_event(state_timeout_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, StActivate)
+  process.send(subject_of(machine), StActivate)
   process.sleep(30)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, StGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), StGetState(reply_with: reply_sub))
 
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(StTimedOut)
@@ -239,13 +250,13 @@ pub fn state_timeout_is_cancelled_on_state_change_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CIdle, initial_data: Nil)
     |> state_machine.on_event(cancel_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, CActivate)
-  process.send(machine.data, CLeave)
+  process.send(subject_of(machine), CActivate)
+  process.send(subject_of(machine), CLeave)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, CGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), CGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(CDone)
 }
@@ -286,13 +297,13 @@ pub fn generic_timeout_fires_after_interval_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: GtWaiting, initial_data: Nil)
     |> state_machine.on_event(generic_timeout_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, GtArm)
+  process.send(subject_of(machine), GtArm)
   process.sleep(30)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, GtGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), GtGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(GtTriggered)
 }
@@ -339,14 +350,14 @@ pub fn cancel_state_timeout_prevents_fire_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CstIdle, initial_data: Nil)
     |> state_machine.on_event(cancel_state_timeout_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, CstActivate)
-  process.send(machine.data, CstCancel)
+  process.send(subject_of(machine), CstActivate)
+  process.send(subject_of(machine), CstCancel)
   process.sleep(30)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, CstGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), CstGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(CstActive)
 }
@@ -394,14 +405,14 @@ pub fn cancel_generic_timeout_prevents_fire_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CgtWaiting, initial_data: Nil)
     |> state_machine.on_event(cancel_generic_timeout_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, CgtArm)
-  process.send(machine.data, CgtCancel)
+  process.send(subject_of(machine), CgtArm)
+  process.send(subject_of(machine), CgtCancel)
   process.sleep(30)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, CgtGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), CgtGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(CgtWaiting)
 }
@@ -447,14 +458,14 @@ pub fn update_state_timeout_fires_without_restart_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: UstWaiting, initial_data: Nil)
     |> state_machine.on_event(update_state_timeout_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, UstArm)
-  process.send(machine.data, UstUpdate)
+  process.send(subject_of(machine), UstArm)
+  process.send(subject_of(machine), UstUpdate)
   process.sleep(300)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, UstGetState(reply_with: reply_sub))
+  process.send(subject_of(machine), UstGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(UstFired)
 }
@@ -490,10 +501,10 @@ pub fn cast_delivers_message_as_cast_event_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CastListening, initial_data: Nil)
     |> state_machine.on_event(cast_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let reply_sub = process.new_subject()
-  state_machine.cast(machine.data, Ping(reply_with: reply_sub))
+  state_machine.cast(machine.ref, Ping(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("pong")
@@ -505,10 +516,10 @@ pub fn send_delivers_message_as_info_not_cast_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CastListening, initial_data: Nil)
     |> state_machine.on_event(cast_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let reply_sub = process.new_subject()
-  state_machine.send(machine.data, Ping(reply_with: reply_sub))
+  state_machine.send(subject_of(machine), Ping(reply_with: reply_sub))
 
   process.receive(reply_sub, 50) |> should.equal(Error(Nil))
 }
@@ -550,12 +561,12 @@ pub fn change_callback_module_keeps_machine_alive_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CbListening, initial_data: Nil)
     |> state_machine.on_event(change_callback_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, CbSwitch)
+  process.send(subject_of(machine), CbSwitch)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, CbPing(reply_with: reply_sub))
+  process.send(subject_of(machine), CbPing(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("pong")
@@ -587,12 +598,12 @@ pub fn push_then_pop_callback_module_roundtrip_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: CbListening, initial_data: Nil)
     |> state_machine.on_event(push_pop_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, CbSwitch)
+  process.send(subject_of(machine), CbSwitch)
 
   let reply_sub = process.new_subject()
-  process.send(machine.data, CbPing(reply_with: reply_sub))
+  process.send(subject_of(machine), CbPing(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("pong")
@@ -631,10 +642,10 @@ pub fn send_request_returns_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let request: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, GetCounter)
+    state_machine.send_request(machine.ref, GetCounter)
   let assert Ok(count) = state_machine.receive_response(request, 1000)
   count |> should.equal(0)
 }
@@ -643,13 +654,13 @@ pub fn send_request_sees_latest_state_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
-  process.send(machine.data, Increment)
-  process.send(machine.data, Increment)
+  process.send(subject_of(machine), Increment)
+  process.send(subject_of(machine), Increment)
 
   let request: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, GetCounter)
+    state_machine.send_request(machine.ref, GetCounter)
   let assert Ok(count) = state_machine.receive_response(request, 1000)
   count |> should.equal(2)
 }
@@ -658,7 +669,7 @@ pub fn request_ids_size_reflects_pending_requests_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let collection: state_machine.RequestIdCollection(String, Int) =
     state_machine.request_ids_new()
@@ -666,7 +677,7 @@ pub fn request_ids_size_reflects_pending_requests_test() {
 
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "first",
       collection,
@@ -675,7 +686,7 @@ pub fn request_ids_size_reflects_pending_requests_test() {
 
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "second",
       collection,
@@ -701,20 +712,20 @@ pub fn send_request_to_collection_delivers_both_replies_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 42)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let collection: state_machine.RequestIdCollection(String, Int) =
     state_machine.request_ids_new()
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "a",
       collection,
     )
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "b",
       collection,
@@ -741,20 +752,20 @@ pub fn request_ids_to_list_contains_all_entries_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 0)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let collection: state_machine.RequestIdCollection(String, Int) =
     state_machine.request_ids_new()
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "x",
       collection,
     )
   let collection =
     state_machine.send_request_to_collection(
-      machine.data,
+      machine.ref,
       GetCounter,
       "y",
       collection,
@@ -781,10 +792,10 @@ pub fn request_ids_add_manually_adds_to_collection_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ReqRunning, initial_data: 7)
     |> state_machine.on_event(reqid_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let request: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, GetCounter)
+    state_machine.send_request(machine.ref, GetCounter)
   let collection: state_machine.RequestIdCollection(String, Int) =
     state_machine.request_ids_new()
   let collection =
@@ -832,7 +843,7 @@ pub fn stop_and_reply_sends_reply_before_stopping_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: SarRunning, initial_data: Nil)
     |> state_machine.on_event(stop_and_reply_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let monitor = process.monitor(machine.pid)
   let sel =
@@ -840,7 +851,7 @@ pub fn stop_and_reply_sends_reply_before_stopping_test() {
     |> process.select_specific_monitor(monitor, fn(d) { d })
 
   let req: state_machine.RequestId(String) =
-    state_machine.send_request(machine.data, SarGetAndStop)
+    state_machine.send_request(machine.ref, SarGetAndStop)
   let assert Ok(reply) = state_machine.receive_response(req, 1000)
   reply |> should.equal("bye")
 
@@ -877,9 +888,9 @@ fn hibernate_after_handler(
 pub fn hibernate_after_puts_idle_process_into_hibernation_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: HibIdle, initial_data: Nil)
-    |> state_machine.hibernate_after(10)
+    |> state_machine.with_hibernate_after(start_options.Milliseconds(10))
     |> state_machine.on_event(hibernate_after_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   // Wait long enough for the idle timer to fire. When hibernating, the
   // process's current_function is gen_statem:loop_hibernate/3.
@@ -892,7 +903,7 @@ pub fn hibernate_after_puts_idle_process_into_hibernation_test() {
 
   // Sending a message wakes the process; the handler still runs.
   let reply_sub = process.new_subject()
-  process.send(machine.data, HibPing(reply_with: reply_sub))
+  process.send(subject_of(machine), HibPing(reply_with: reply_sub))
   let assert Ok(reply) = process.receive(reply_sub, 1000)
   reply |> should.equal("pong")
 }
@@ -902,7 +913,7 @@ pub fn machine_without_hibernate_after_does_not_hibernate_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: HibIdle, initial_data: Nil)
     |> state_machine.on_event(hibernate_after_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   process.sleep(50)
 
@@ -953,7 +964,7 @@ pub fn on_format_status_overrides_data_in_status_report_test() {
       }
       state_machine.Status(..status, data: FmtRedacted(label: label))
     })
-    |> state_machine.start
+    |> state_machine.start_link
 
   let status = sys_get_status(machine.pid)
   string.inspect(status)
@@ -965,7 +976,7 @@ pub fn machine_without_format_status_still_appears_in_status_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: FmtIdle, initial_data: FmtSecret(value: 0))
     |> state_machine.on_event(fmt_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   // Should not crash; sys:get_status returns a non-empty term.
   let _ = sys_get_status(machine.pid)
@@ -1010,14 +1021,14 @@ pub fn stop_server_terminates_machine_with_normal_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let monitor = process.monitor(machine.pid)
   let sel =
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(d) { d })
 
-  state_machine.stop_server(machine.data)
+  state_machine.stop_server(subject_of(machine))
 
   let assert Ok(down) = process.selector_receive(sel, 1000)
   down.reason |> should.equal(process.Normal)
@@ -1032,7 +1043,7 @@ pub fn stop_server_with_custom_reason_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let monitor = process.monitor(machine.pid)
   let sel =
@@ -1042,7 +1053,7 @@ pub fn stop_server_with_custom_reason_test() {
   let reason = process.Abnormal(dynamic.string("shutdown_requested"))
   let _ =
     process.spawn_unlinked(fn() {
-      state_machine.stop_server_with(machine.data, reason, 1000)
+      state_machine.stop_server_with(subject_of(machine), reason, 1000)
     })
 
   // The exact reason round-tripping through gleam_erlang's monitor decoder
@@ -1060,11 +1071,11 @@ pub fn send_reply_from_external_process_completes_call_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let stash: process.Subject(state_machine.From(Int)) = process.new_subject()
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliAsk(stash))
+    state_machine.send_request(machine.ref, CliAsk(stash))
 
   let assert Ok(from) = process.receive(stash, 1000)
   state_machine.send_reply(from, 123)
@@ -1077,14 +1088,14 @@ pub fn send_replies_completes_multiple_calls_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let stash: process.Subject(state_machine.From(Int)) = process.new_subject()
 
   let req1: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliAsk(stash))
+    state_machine.send_request(machine.ref, CliAsk(stash))
   let req2: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliAsk(stash))
+    state_machine.send_request(machine.ref, CliAsk(stash))
 
   let assert Ok(from1) = process.receive(stash, 1000)
   let assert Ok(from2) = process.receive(stash, 1000)
@@ -1101,10 +1112,10 @@ pub fn wait_response_returns_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 99)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliGet)
+    state_machine.send_request(machine.ref, CliGet)
   let assert Ok(value) = state_machine.wait_response(req)
   value |> should.equal(99)
 }
@@ -1113,10 +1124,10 @@ pub fn wait_response_timeout_yields_receive_timeout_when_no_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliNoReply)
+    state_machine.send_request(machine.ref, CliNoReply)
 
   state_machine.wait_response_timeout(req, 50)
   |> should.equal(Error(state_machine.ReceiveTimeout))
@@ -1126,10 +1137,10 @@ pub fn check_response_returns_none_for_unrelated_message_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliGet)
+    state_machine.send_request(machine.ref, CliGet)
 
   // An int dynamic is not a gen_statem reply tuple.
   let unrelated = dynamic.int(42)
@@ -1146,10 +1157,10 @@ pub fn check_response_returns_some_for_matching_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 11)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliGet)
+    state_machine.send_request(machine.ref, CliGet)
 
   let selector =
     process.new_selector()
@@ -1169,10 +1180,10 @@ pub fn receive_response_blocking_returns_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 7)
     |> state_machine.on_event(client_handler)
-    |> state_machine.start
+    |> state_machine.start_link
 
   let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.data, CliGet)
+    state_machine.send_request(machine.ref, CliGet)
   let assert Ok(value) = state_machine.receive_response_blocking(req)
   value |> should.equal(7)
 }

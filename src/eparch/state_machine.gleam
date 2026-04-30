@@ -10,9 +10,14 @@
 //// - Returns strongly-typed Steps instead of various tuple formats
 ////
 
+import eparch/start_options.{
+  type DebugFlag, type SpawnOption, type Timeout, Milliseconds,
+}
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
-import gleam/erlang/process.{type ExitReason, type Pid, type Subject}
+import gleam/erlang/process.{
+  type ExitReason, type Monitor, type Name, type Pid, type Subject,
+}
 import gleam/option.{type Option, None, Some}
 
 type StateEnter {
@@ -20,25 +25,51 @@ type StateEnter {
   StateEnterDisabled
 }
 
+/// A name under which a state machine can be registered.
+///
+/// Mirrors `gen_statem:server_name/0`:
+/// - `Local(name)` registers locally with `erlang:register/2` and gives back
+///   a `process.Name(message)` you can turn into a `Subject(message)`.
+/// - `Global(name)` registers across nodes via the `global` module.
+/// - `Via(module, name)` dispatches registration through any module
+///   implementing the `via` registry behaviour (e.g. `gproc`, `syn`).
+///
+pub type ServerName(message) {
+  Local(name: Name(message))
+  Global(name: Atom)
+  Via(module: Atom, name: Dynamic)
+}
+
+/// An opaque, phantom-typed handle to a running state machine.
+///
+/// Returned by `start_link`, `start`, and `start_monitor`. Accepted by
+/// `cast`, `send_request`, and `send_request_to_collection`. For unnamed and
+/// `Local`-named servers, `ref_to_subject` exposes the underlying
+/// `Subject(message)` so that `process.send`, `state_machine.send`, and
+/// `state_machine.call` can be used as well.
+///
+pub type ServerRef(message)
+
 /// A builder for configuring a state machine before starting it.
 ///
 /// Generic parameters:
 /// - `state`: The type of state values (e.g., enum, custom type)
 /// - `data`: The type of data carried across state transitions
 /// - `message`: The type of messages the state machine receives
-/// - `return`: What the start function returns to the parent
 /// - `reply`: The type of replies produced for synchronous `Call` events
 ///
-pub opaque type Builder(state, data, message, return, reply) {
+pub opaque type Builder(state, data, message, reply) {
   Builder(
     initial_state: state,
     initial_data: data,
     event_handler: fn(Event(state, message, reply), state, data) ->
       Step(state, data, message, reply),
     state_enter: StateEnter,
-    initialisation_timeout: Int,
-    name: Option(process.Name(message)),
-    hibernate_after: Option(Int),
+    timeout: Timeout,
+    hibernate_after: Timeout,
+    debug: List(DebugFlag),
+    spawn_options: List(SpawnOption),
+    name: Option(ServerName(message)),
     on_code_change: Option(fn(data) -> data),
     on_format_status: Option(
       fn(Status(state, data, message, reply)) ->
@@ -248,13 +279,21 @@ pub type NextEventType(reply) {
 pub type From(reply)
 
 /// Data returned when a state machine starts successfully.
-pub type Started(data) {
+pub type Started(message) {
   Started(
-    /// The process identifier of the started state machine
+    /// The process identifier of the started state machine.
     pid: Pid,
-    /// Data returned after initialization (typically a Subject)
-    data: data,
+    /// Opaque handle suitable for `cast`, `send_request`, etc. For unnamed
+    /// and `Local`-named starts, also convertible to a `Subject(message)`
+    /// via `ref_to_subject`.
+    ref: ServerRef(message),
   )
+}
+
+/// Data returned by `start_monitor`: a started machine plus the OTP-23+
+/// atomic monitor for it.
+pub type MonitoredMachine(message) {
+  MonitoredMachine(pid: Pid, ref: ServerRef(message), monitor: Monitor)
 }
 
 /// Errors that can occur when starting a state machine.
@@ -262,11 +301,13 @@ pub type StartError {
   InitTimeout
   InitFailed(String)
   InitExited(ExitReason)
+  /// The requested name was already registered to another process.
+  AlreadyStarted(pid: Pid)
 }
 
 /// Convenience type for start results.
-pub type StartResult(data) =
-  Result(Started(data), StartError)
+pub type StartResult(message) =
+  Result(Started(message), StartError)
 
 /// An opaque request ID returned by `send_request`.
 ///
@@ -323,29 +364,31 @@ pub type CollectionResponse(reply, label) {
 
 /// Create a new state machine builder with initial state and data.
 ///
-/// By default, the state machine will return a Subject that can be used
-/// to send messages to it.
+/// Defaults to a 1-second initialisation timeout, no idle-hibernation, no
+/// debug flags, no spawn options, and an unnamed (anonymous) registration.
 ///
 /// ## Example
 ///
 /// ```gleam
 /// state_machine.new(initial_state: Idle, initial_data: 0)
 /// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
+/// |> state_machine.start_link
 /// ```
 ///
 pub fn new(
   initial_state initial_state: state,
   initial_data initial_data: data,
-) -> Builder(state, data, message, Subject(message), reply) {
+) -> Builder(state, data, message, reply) {
   Builder(
     initial_state: initial_state,
     initial_data: initial_data,
     event_handler: fn(_, _state, data) { keep_state(data, []) },
     state_enter: StateEnterDisabled,
-    initialisation_timeout: 1000,
+    timeout: Milliseconds(1000),
+    hibernate_after: start_options.Infinity,
+    debug: [],
+    spawn_options: [],
     name: None,
-    hibernate_after: None,
     on_code_change: None,
     on_format_status: None,
   )
@@ -374,14 +417,14 @@ pub fn new(
 ///
 /// state_machine.new(Running, Data(0))
 /// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
+/// |> state_machine.start_link
 /// ```
 ///
 pub fn on_event(
-  builder: Builder(state, data, message, return, reply),
+  builder: Builder(state, data, message, reply),
   handler: fn(Event(state, message, reply), state, data) ->
     Step(state, data, message, reply),
-) -> Builder(state, data, message, return, reply) {
+) -> Builder(state, data, message, reply) {
   Builder(..builder, event_handler: handler)
 }
 
@@ -409,54 +452,77 @@ pub fn on_event(
 /// state_machine.new(Idle, data)
 /// |> state_machine.with_state_enter()
 /// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
+/// |> state_machine.start_link
 /// ```
 ///
 pub fn with_state_enter(
-  builder: Builder(state, data, message, return, reply),
-) -> Builder(state, data, message, return, reply) {
+  builder: Builder(state, data, message, reply),
+) -> Builder(state, data, message, reply) {
   Builder(..builder, state_enter: StateEnterEnabled)
 }
 
 /// Provide a name for the state machine to be registered with when started.
 ///
-/// This enables sending messages to it via a named subject.
+/// Pass `Local(name)` for the common local-atom registration (the only form
+/// compatible with a `process.Subject`), `Global(name)` for cluster-wide
+/// registration via the `global` module, or `Via(module, term)` for a
+/// custom registry such as `gproc` or `syn`.
 ///
 pub fn named(
-  builder: Builder(state, data, message, return, reply),
-  name: process.Name(message),
-) -> Builder(state, data, message, return, reply) {
+  builder: Builder(state, data, message, reply),
+  name: ServerName(message),
+) -> Builder(state, data, message, reply) {
   Builder(..builder, name: Some(name))
 }
 
-// TODO: reject negative `milliseconds` values; gen_statem requires
-// `timeout()` (0..infinity) and will crash at start otherwise.
+/// Set the initialisation timeout. Forwarded to `gen_statem` as
+/// `{timeout, _}`. Defaults to `Milliseconds(1000)`.
+///
+pub fn with_timeout(
+  builder: Builder(state, data, message, reply),
+  timeout: Timeout,
+) -> Builder(state, data, message, reply) {
+  Builder(..builder, timeout: timeout)
+}
 
 /// Configure the [`hibernate_after`](https://www.erlang.org/doc/apps/stdlib/gen_statem.html#start_link/3)
 /// start option.
 ///
-/// When the state machine has been idle for at least `milliseconds`, the
+/// When the state machine has been idle for at least the given duration, the
 /// process hibernates (calls `proc_lib:hibernate/3`), trading a small wake-up
 /// cost for reduced memory footprint until the next event arrives. Useful for
-/// long-lived machines that spend most of their time waiting.
+/// long-lived machines that spend most of their time waiting. Defaults to
+/// `Infinity` (never hibernate).
 ///
 /// This is independent of the per-callback `Hibernate` action, which forces
 /// hibernation immediately after a single callback returns.
 ///
-/// ## Example
+pub fn with_hibernate_after(
+  builder: Builder(state, data, message, reply),
+  timeout: Timeout,
+) -> Builder(state, data, message, reply) {
+  Builder(..builder, hibernate_after: timeout)
+}
+
+/// Set the `sys` debug flags forwarded to the state machine on start.
 ///
-/// ```gleam
-/// state_machine.new(initial_state: Idle, initial_data: 0)
-/// |> state_machine.hibernate_after(60_000)
-/// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
-/// ```
+pub fn with_debug(
+  builder: Builder(state, data, message, reply),
+  flags: List(DebugFlag),
+) -> Builder(state, data, message, reply) {
+  Builder(..builder, debug: flags)
+}
+
+/// Set the `erlang:spawn_opt/2` options forwarded to the state machine
+/// process on start. `link` and `monitor` are not exposed here; they are
+/// determined by the lifecycle entry point used (`start_link`, `start`,
+/// `start_monitor`).
 ///
-pub fn hibernate_after(
-  builder: Builder(state, data, message, return, reply),
-  milliseconds: Int,
-) -> Builder(state, data, message, return, reply) {
-  Builder(..builder, hibernate_after: Some(milliseconds))
+pub fn with_spawn_options(
+  builder: Builder(state, data, message, reply),
+  spawn_options: List(SpawnOption),
+) -> Builder(state, data, message, reply) {
+  Builder(..builder, spawn_options: spawn_options)
 }
 
 /// Provide a migration function called during hot-code upgrades.
@@ -477,13 +543,13 @@ pub fn hibernate_after(
 /// state_machine.new(Idle, 0)
 /// |> state_machine.on_code_change(fn(old_count) { Data(old_count, "default") })
 /// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
+/// |> state_machine.start_link
 /// ```
 ///
 pub fn on_code_change(
-  builder: Builder(state, data, message, return, reply),
+  builder: Builder(state, data, message, reply),
   handler: fn(data) -> data,
-) -> Builder(state, data, message, return, reply) {
+) -> Builder(state, data, message, reply) {
   Builder(..builder, on_code_change: Some(handler))
 }
 
@@ -507,22 +573,28 @@ pub fn on_code_change(
 ///   Status(..status, data: Credentials("<redacted>"))
 /// })
 /// |> state_machine.on_event(handle_event)
-/// |> state_machine.start
+/// |> state_machine.start_link
 /// ```
 ///
 pub fn on_format_status(
-  builder: Builder(state, data, message, return, reply),
+  builder: Builder(state, data, message, reply),
   formatter: fn(Status(state, data, message, reply)) ->
     Status(state, data, message, reply),
-) -> Builder(state, data, message, return, reply) {
+) -> Builder(state, data, message, reply) {
   Builder(..builder, on_format_status: Some(formatter))
 }
 
-/// Start the state machine process.
+type LinkMode {
+  Link
+  NoLink
+}
+
+/// Start a state machine process linked to the caller.
 ///
-/// Spawns a linked gen_statem process, runs initialisation, and returns
-/// a `Started` value containing the PID and a `Subject` that can be used
-/// to send messages to the machine.
+/// Maps to `gen_statem:start_link/3,4`. Returns a `Started(message)` value
+/// containing the PID and a `ServerRef(message)`. For unnamed and `Local`-
+/// named starts, the ref is convertible to a `Subject(message)` via
+/// `ref_to_subject`.
 ///
 /// ## Example
 ///
@@ -530,58 +602,81 @@ pub fn on_format_status(
 /// let assert Ok(machine) =
 ///   state_machine.new(initial_state: Idle, initial_data: 0)
 ///   |> state_machine.on_event(handle_event)
-///   |> state_machine.start
+///   |> state_machine.start_link
 ///
-/// // Send a fire-and-forget message
-/// process.send(machine.data, SomeMessage)
-///
-/// // Send a synchronous message with a reply
-/// let reply = process.call(machine.data, 1000, SomeRequest)
+/// let assert Ok(subject) = state_machine.ref_to_subject(machine.ref)
+/// process.send(subject, SomeMessage)
 /// ```
 ///
+pub fn start_link(
+  builder: Builder(state, data, message, reply),
+) -> StartResult(message) {
+  do_start(Link, builder)
+}
+
+/// Start a state machine process without linking it to the caller.
+///
+/// Maps to `gen_statem:start/3,4`. Useful when the parent does not want a
+/// link-based crash propagation, e.g. when the parent will set up its own
+/// monitor or when the machine is started under a custom supervisor.
+///
 pub fn start(
-  builder: Builder(state, data, message, Subject(message), reply),
-) -> StartResult(Subject(message)) {
-  let Builder(
-    initial_state:,
-    initial_data:,
-    event_handler:,
-    state_enter:,
-    initialisation_timeout:,
-    name:,
-    hibernate_after:,
-    on_code_change:,
-    on_format_status:,
-  ) = builder
-  do_start(
-    initial_state,
-    initial_data,
-    event_handler,
-    state_enter,
-    initialisation_timeout,
-    name,
-    hibernate_after,
-    on_code_change,
-    on_format_status,
-  )
+  builder: Builder(state, data, message, reply),
+) -> StartResult(message) {
+  do_start(NoLink, builder)
+}
+
+/// Start a state machine process linked to the caller and atomically return
+/// a monitor for it.
+///
+/// Maps to `gen_statem:start_monitor/3,4` (OTP 23.0+). Equivalent to
+/// `start_link` followed by `process.monitor`, but without the race window
+/// between the two calls.
+///
+pub fn start_monitor(
+  builder: Builder(state, data, message, reply),
+) -> Result(MonitoredMachine(message), StartError) {
+  do_start_monitor(builder)
 }
 
 @external(erlang, "statem_ffi", "do_start")
 fn do_start(
-  initial_state: state,
-  initial_data: data,
-  event_handler: fn(Event(state, message, reply), state, data) ->
-    Step(state, data, message, reply),
-  state_enter: StateEnter,
-  initialisation_timeout: Int,
-  name: Option(process.Name(message)),
-  hibernate_after: Option(Int),
-  on_code_change: Option(fn(data) -> data),
-  on_format_status: Option(
-    fn(Status(state, data, message, reply)) ->
-      Status(state, data, message, reply),
-  ),
-) -> Result(Started(Subject(message)), StartError)
+  link_mode: LinkMode,
+  builder: Builder(state, data, message, reply),
+) -> StartResult(message)
+
+@external(erlang, "statem_ffi", "do_start_monitor")
+fn do_start_monitor(
+  builder: Builder(state, data, message, reply),
+) -> Result(MonitoredMachine(message), StartError)
+
+/// Extract the `Subject(message)` underlying a `ServerRef(message)`.
+///
+/// Succeeds for refs returned by unnamed starts and `Local`-named starts.
+/// Returns `Error(Nil)` for refs registered through `Global` or `Via`,
+/// because those servers cannot be addressed by a `Subject`: they live
+/// outside the local-atom name table.
+///
+@external(erlang, "statem_ffi", "ref_to_subject")
+pub fn ref_to_subject(ref: ServerRef(message)) -> Result(Subject(message), Nil)
+
+/// Wrap an existing `Subject(message)` as a `ServerRef(message)`.
+///
+/// Useful when a state machine's subject is already in hand (e.g. captured
+/// during start) and it needs to be passed to a function that expects a
+/// `ServerRef`.
+///
+@external(erlang, "statem_ffi", "ref_from_subject")
+pub fn ref_from_subject(subject: Subject(message)) -> ServerRef(message)
+
+/// Wrap a raw `Pid` as a `ServerRef(message)`.
+///
+/// The phantom `message` parameter is unchecked; callers are responsible
+/// for passing the correct type. Use only when the Pid is known to belong
+/// to an eparch state machine handling messages of the expected type.
+///
+@external(erlang, "statem_ffi", "ref_from_pid")
+pub fn ref_from_pid(pid: Pid) -> ServerRef(message)
 
 /// Create a NextState step indicating a state transition.
 ///
@@ -877,7 +972,7 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 /// ```
 ///
 @external(erlang, "statem_ffi", "cast")
-pub fn cast(subject: Subject(message), message: message) -> Nil
+pub fn cast(ref: ServerRef(message), message: message) -> Nil
 
 /// Send a synchronous call and wait for a reply.
 ///
@@ -940,13 +1035,13 @@ pub fn request_ids_to_list(
 /// and must reply with a `Reply(from, value)` action.
 ///
 /// The `reply` type cannot always be inferred, so annotate the binding when
-/// needed: `let request: RequestId(MyReply) = send_request(subject, MyMsg)`
+/// needed: `let request: RequestId(MyReply) = send_request(machine.ref, MyMsg)`
 ///
 /// ## Example
 ///
 /// ```gleam
 /// let request: state_machine.RequestId(Int) =
-///   state_machine.send_request(machine.data, GetCount)
+///   state_machine.send_request(machine.ref, GetCount)
 /// // ... do other work ...
 /// let assert Ok(count) = state_machine.receive_response(request, 1000)
 /// ```
@@ -955,7 +1050,7 @@ pub fn request_ids_to_list(
 ///
 @external(erlang, "statem_ffi", "send_request")
 pub fn send_request(
-  subject: Subject(message),
+  ref: ServerRef(message),
   message: message,
 ) -> RequestId(reply)
 
@@ -982,7 +1077,7 @@ pub fn send_request(
 ///
 @external(erlang, "statem_ffi", "send_request_to_collection")
 pub fn send_request_to_collection(
-  subject: Subject(message),
+  ref: ServerRef(message),
   message: message,
   label: label,
   to collection: RequestIdCollection(label, reply),

@@ -37,6 +37,9 @@
 //// }
 //// ```
 
+import eparch/start_options.{
+  type DebugFlag, type SpawnOption, type Timeout, Infinity,
+}
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
@@ -63,48 +66,6 @@ pub type StartError {
   /// Startup failed for another reason. `reason` is a human-readable string
   /// produced from the raw Erlang error term.
   StartFailed(reason: String)
-}
-
-/// A timeout: either a fixed number of milliseconds or `Infinity`.
-pub type Timeout {
-  Infinity
-  Milliseconds(ms: Int)
-}
-
-/// Process priority for `SpawnPriority`.
-pub type Priority {
-  PriorityLow
-  PriorityNormal
-  PriorityHigh
-  PriorityMax
-}
-
-/// Message queue storage mode for `SpawnMessageQueueData`.
-pub type MessageQueueMode {
-  OnHeap
-  OffHeap
-}
-
-/// Flags for the `debug` option of `StartOptions`.
-pub type DebugFlag {
-  DebugTrace
-  DebugLog
-  DebugStatistics
-  DebugLogToFile(file_name: String)
-}
-
-/// Flags for the `spawn_options` option of `StartOptions`. Subset of
-/// `erlang:spawn_opt/2`'s options that are meaningful for a long-running
-/// server process. `link` and `monitor` are intentionally omitted — the
-/// manager is always linked (and optionally monitored) by the `start` /
-/// `start_monitor` entry points themselves.
-pub type SpawnOption {
-  SpawnPriority(level: Priority)
-  SpawnFullsweepAfter(count: Int)
-  SpawnMinHeapSize(size: Int)
-  SpawnMinBinVheapSize(size: Int)
-  SpawnMaxHeapSize(size: Int)
-  SpawnMessageQueueData(mode: MessageQueueMode)
 }
 
 /// Options for `start_monitor`. Build a value with `new_start_options()` and

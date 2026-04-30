@@ -13,7 +13,8 @@ import pushbutton
 
 fn start() -> process.Subject(pushbutton.Msg) {
   let assert Ok(machine) = pushbutton.start()
-  machine.data
+  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
+  subject
 }
 
 /// A freshly started pushbutton has count 0.
@@ -76,10 +77,11 @@ pub fn get_count_is_state_agnostic_test() {
 /// Casts are ignored: the handler only responds to synchronous calls.
 /// Sending a cast must leave the count untouched and produce no reply.
 pub fn cast_is_silently_ignored_test() {
-  let subject = start()
+  let assert Ok(machine) = pushbutton.start()
+  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
 
   let reply_sub = process.new_subject()
-  sm.cast(subject, pushbutton.Push(reply_sub))
+  sm.cast(machine.ref, pushbutton.Push(reply_sub))
 
   // No reply arrives.
   process.receive(reply_sub, 50) |> should.equal(Error(Nil))
