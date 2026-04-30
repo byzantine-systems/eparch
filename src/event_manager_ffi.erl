@@ -116,48 +116,14 @@ do_start_monitor({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, S
     end.
 
 build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts) ->
-    [{timeout, timeout_to_erlang(Timeout)}, {hibernate_after, timeout_to_erlang(HibernateAfter)}] ++
-        case DebugFlags of
-            [] -> [];
-            _ -> [{debug, [debug_to_erlang(F) || F <- DebugFlags]}]
-        end ++
-        case SpawnOpts of
-            [] -> [];
-            _ -> [{spawn_opt, [spawn_opt_to_erlang(O) || O <- SpawnOpts]}]
-        end.
-
-timeout_to_erlang(infinity) -> infinity;
-timeout_to_erlang({milliseconds, Ms}) -> Ms.
-
-debug_to_erlang(debug_trace) -> trace;
-debug_to_erlang(debug_log) -> log;
-debug_to_erlang(debug_statistics) -> statistics;
-debug_to_erlang({debug_log_to_file, FileName}) -> {log_to_file, FileName}.
-
-spawn_opt_to_erlang({spawn_priority, Level}) ->
-    {priority, priority_to_erlang(Level)};
-spawn_opt_to_erlang({spawn_fullsweep_after, N}) ->
-    {fullsweep_after, N};
-spawn_opt_to_erlang({spawn_min_heap_size, N}) ->
-    {min_heap_size, N};
-spawn_opt_to_erlang({spawn_min_bin_vheap_size, N}) ->
-    {min_bin_vheap_size, N};
-spawn_opt_to_erlang({spawn_max_heap_size, N}) ->
-    {max_heap_size, N};
-spawn_opt_to_erlang({spawn_message_queue_data, Mode}) ->
-    {message_queue_data, mq_mode_to_erlang(Mode)}.
+    [
+        {timeout, eparch_options_ffi:timeout_to_erlang(Timeout)},
+        {hibernate_after, eparch_options_ffi:timeout_to_erlang(HibernateAfter)}
+    ] ++ eparch_options_ffi:build_extra_opts(DebugFlags, SpawnOpts).
 
 %% Render an Erlang error term as a human-readable Gleam string.
 format_reason(Reason) ->
     unicode:characters_to_binary(io_lib:format("~p", [Reason])).
-
-priority_to_erlang(priority_low) -> low;
-priority_to_erlang(priority_normal) -> normal;
-priority_to_erlang(priority_high) -> high;
-priority_to_erlang(priority_max) -> max.
-
-mq_mode_to_erlang(on_heap) -> on_heap;
-mq_mode_to_erlang(off_heap) -> off_heap.
 
 -doc """
 Stop the event manager, terminating it with reason `normal`.

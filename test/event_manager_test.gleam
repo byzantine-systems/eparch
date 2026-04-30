@@ -6,6 +6,7 @@
 ////
 
 import eparch/event_manager
+import eparch/start_options
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process
 import gleam/int
@@ -400,9 +401,9 @@ pub fn start_monitor_already_started_returns_error_test() {
 pub fn start_monitor_accepts_option_passthrough_test() {
   let options =
     event_manager.new_start_options()
-    |> event_manager.with_timeout(event_manager.Milliseconds(5000))
+    |> event_manager.with_timeout(start_options.Milliseconds(5000))
     |> event_manager.with_spawn_options([
-      event_manager.SpawnPriority(event_manager.PriorityNormal),
+      start_options.SpawnPriority(start_options.PriorityNormal),
     ])
 
   let assert Ok(monitored) = event_manager.start_monitor(options)

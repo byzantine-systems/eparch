@@ -7,7 +7,14 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 -behaviour(gen_statem).
 
 %% Public API
--export([do_start/9, cast/2]).
+-export([
+    do_start/2,
+    do_start_monitor/1,
+    cast/2,
+    ref_to_subject/1,
+    ref_from_subject/1,
+    ref_from_pid/1
+]).
 -export([
     stop_server/1,
     stop_server_with/3,
@@ -42,8 +49,14 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 %%%===================================================================
 %%% Internal State Records & Types
 %%%===================================================================
--type process_name_option() :: none | {some, Name :: string()}.
--type state_enter_option() :: state_enter_disabled | state_enter_enabled.
+%% Gleam-side `ServerName(message)` ADT, encoded as the same tuple shape
+%% gen_statem expects, so the value can be passed straight to OTP.
+-type server_name_option() ::
+    none
+    | {some,
+        {local, atom()}
+        | {global, atom()}
+        | {via, atom(), term()}}.
 
 -record(gleam_statem, {
     % Current Gleam state value
@@ -69,93 +82,99 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 %%% called from Gleam via @external
 %%%===================================================================
 -doc """
-Start a `gen_statem` process linked to the caller and return the Subject
-needed to send messages to it
+Start a `gen_statem` process either linked (`link`) or unlinked (`no_link`).
+
+The Gleam side passes a `LinkMode` selector and the opaque `Builder` record;
+the latter is encoded at the Erlang level as the 12-tuple defined in
+`eparch/state_machine`. Returns the Gleam `Started(message)` 3-tuple
+`{started, Pid, ServerRef}` or a mapped error.
 """.
--spec do_start(
-    InitialState,
-    InitialData,
-    Handler,
-    StateEnter,
-    TimeOut,
-    Name,
-    HibernateAfter,
-    OnCodeChange,
-    OnFormatStatus
-) ->
-    Result
-when
-    InitialState :: any(),
-    InitialData :: any(),
-    Handler :: any(),
-    StateEnter :: state_enter_option(),
-    TimeOut :: timeout(),
-    Name :: process_name_option(),
-    HibernateAfter :: none | {some, non_neg_integer()},
-    OnCodeChange :: any(),
-    OnFormatStatus :: any(),
+-spec do_start(LinkMode, Builder) -> Result when
+    LinkMode :: link | no_link,
+    Builder :: tuple(),
     Result :: any().
-do_start(
-    InitialState,
-    InitialData,
-    Handler,
-    StateEnter,
-    Timeout,
-    Name,
-    HibernateAfter,
-    OnCodeChange,
-    OnFormatStatus
-) ->
-    %% Ack channel: a unique reference the child process will use to
-    %% send us the Subject it creates in init/1.
+do_start(LinkMode, Builder) ->
+    {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
+    StartResult = invoke_start(LinkMode, NameOpt, InitArgs, ExtraOpts),
+    handle_start_result(StartResult, AckTag).
+
+-doc """
+Start a `gen_statem` process linked to the caller with an atomic monitor
+(OTP 23.0+). Returns the Gleam `MonitoredMachine(message)` 4-tuple
+`{monitored_machine, Pid, ServerRef, MonitorRef}` or a mapped error.
+""".
+-spec do_start_monitor(Builder) -> Result when
+    Builder :: tuple(),
+    Result :: any().
+do_start_monitor(Builder) ->
+    {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
+    StartResult = invoke_start(atomic_monitor, NameOpt, InitArgs, ExtraOpts),
+    handle_monitor_start_result(StartResult, AckTag).
+
+%% --- builder unpacking ----------------------------------------------------
+
+-spec unpack_builder(tuple()) -> {reference(), tuple(), [term()], server_name_option()}.
+unpack_builder(Builder) ->
+    {builder, InitialState, InitialData, Handler, StateEnter, Timeout, HibernateAfter, Debug,
+        SpawnOpts, NameOpt, OnCodeChange, OnFormatStatus} = Builder,
     AckTag = make_ref(),
     Parent = self(),
-
     InitArgs =
-        {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name,
+        {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, NameOpt,
             OnCodeChange, OnFormatStatus},
+    ExtraOpts =
+        [
+            {timeout, eparch_options_ffi:timeout_to_erlang(Timeout)},
+            {hibernate_after, eparch_options_ffi:timeout_to_erlang(HibernateAfter)}
+        ] ++ eparch_options_ffi:build_extra_opts(Debug, SpawnOpts),
+    {AckTag, InitArgs, ExtraOpts, NameOpt}.
 
-    BaseOpts = [{timeout, Timeout}],
-    Opts =
-        case HibernateAfter of
-            none -> BaseOpts;
-            {some, Ms} -> [{hibernate_after, Ms} | BaseOpts]
-        end,
+-spec invoke_start(link | no_link | atomic_monitor, server_name_option(), tuple(), [term()]) ->
+    {ok, pid()} | {ok, {pid(), reference()}} | {error, term()}.
+invoke_start(link, none, InitArgs, Opts) ->
+    gen_statem:start_link(?MODULE, InitArgs, Opts);
+invoke_start(link, {some, ServerName}, InitArgs, Opts) ->
+    gen_statem:start_link(ServerName, ?MODULE, InitArgs, Opts);
+invoke_start(no_link, none, InitArgs, Opts) ->
+    gen_statem:start(?MODULE, InitArgs, Opts);
+invoke_start(no_link, {some, ServerName}, InitArgs, Opts) ->
+    gen_statem:start(ServerName, ?MODULE, InitArgs, Opts);
+invoke_start(atomic_monitor, none, InitArgs, Opts) ->
+    gen_statem:start_monitor(?MODULE, InitArgs, Opts);
+invoke_start(atomic_monitor, {some, ServerName}, InitArgs, Opts) ->
+    gen_statem:start_monitor(ServerName, ?MODULE, InitArgs, Opts).
 
-    StartResult =
-        case Name of
-            none ->
-                gen_statem:start_link(?MODULE, InitArgs, Opts);
-            {some, ProcessName} ->
-                gen_statem:start_link(
-                    %% TODO: Change this to support other formats
-                    %% https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:server_name/0
-                    {local, ProcessName},
-                    ?MODULE,
-                    InitArgs,
-                    Opts
-                )
-        end,
+handle_start_result({ok, Pid}, AckTag) when is_pid(Pid) ->
+    case await_init_ack(AckTag) of
+        {ok, ServerRef} -> {ok, {started, Pid, ServerRef}};
+        Error -> Error
+    end;
+handle_start_result(Error, _AckTag) ->
+    classify_start_error(Error).
 
-    case StartResult of
-        {ok, Pid} ->
-            %% init/1 runs synchronously inside start_link, so the Subject
-            %% is already waiting in our mailbox. Use after 0 as a safety net,
-            %% in practice the message is always there.
-            receive
-                {AckTag, Subject} ->
-                    {ok, {started, Pid, Subject}}
-            after 0 ->
-                %% Should "never" happen, indicates a bug in init/1.
-                {error, {init_failed, <<"init/1 did not deliver a Subject">>}}
-            end;
-        {error, timeout} ->
-            {error, init_timeout};
-        {error, {already_started, _OtherPid}} ->
-            {error, {init_failed, <<"process name already registered">>}};
-        {error, Reason} ->
-            {error, {init_exited, {abnormal, Reason}}}
+handle_monitor_start_result({ok, {Pid, MonRef}}, AckTag) when is_pid(Pid) ->
+    case await_init_ack(AckTag) of
+        {ok, ServerRef} -> {ok, {monitored_machine, Pid, ServerRef, MonRef}};
+        Error -> Error
+    end;
+handle_monitor_start_result(Error, _AckTag) ->
+    classify_start_error(Error).
+
+await_init_ack(AckTag) ->
+    %% init/1 runs synchronously inside start_link/start/start_monitor, so
+    %% the ServerRef is already in our mailbox by the time we get here.
+    receive
+        {AckTag, ServerRef} -> {ok, ServerRef}
+    after 0 ->
+        {error, {init_failed, <<"init/1 did not deliver a ServerRef">>}}
     end.
+
+classify_start_error({error, timeout}) ->
+    {error, init_timeout};
+classify_start_error({error, {already_started, OtherPid}}) when is_pid(OtherPid) ->
+    {error, {already_started, OtherPid}};
+classify_start_error({error, Reason}) ->
+    {error, {init_exited, {abnormal, Reason}}}.
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -170,22 +189,17 @@ init(
     {init_args, InitialState, InitialData, Handler, StateEnter, Parent, AckTag, Name, OnCodeChange,
         OnFormatStatus}
 ) ->
-    %% Build the Subject and determine the tag used for message unwrapping.
-    {Subject, SubjectTag} =
-        case Name of
-            none ->
-                %% Unnamed process: tag is a unique reference, subject is the
-                %% standard {subject, Pid, Tag} Gleam variant.
-                Tag = make_ref(),
-                {{subject, self(), Tag}, Tag};
-            {some, ProcessName} ->
-                %% Named process: tag is the atom, subject is the
-                %% {named_subject, Name} Gleam variant.
-                {{named_subject, ProcessName}, ProcessName}
-        end,
+    %% Build the ServerRef and determine the tag used for info-message
+    %% unwrapping. For unnamed and Local-named servers the ref carries a
+    %% Subject, so the tag matches what callers send via process.send. For
+    %% Global/Via, no Subject is associated, but we still pick a fresh
+    %% reference as the tag so unrelated info messages always pass through
+    %% raw (the ref will never collide with an external sender).
+    {ServerRef, SubjectTag} = build_server_ref(Name),
 
-    %% Send the Subject to the parent before gen_statem unblocks start_link.
-    Parent ! {AckTag, Subject},
+    %% Send the ServerRef to the parent before gen_statem unblocks the
+    %% start* call.
+    Parent ! {AckTag, ServerRef},
 
     GleamStatem = #gleam_statem{
         gleam_state = InitialState,
@@ -198,6 +212,17 @@ init(
     },
 
     {ok, InitialState, GleamStatem}.
+
+-spec build_server_ref(server_name_option()) -> {tuple(), term()}.
+build_server_ref(none) ->
+    Tag = make_ref(),
+    {{server_ref_subject, {subject, self(), Tag}}, Tag};
+build_server_ref({some, {local, NameAtom}}) ->
+    {{server_ref_subject, {named_subject, NameAtom}}, NameAtom};
+build_server_ref({some, {global, GlobalName}}) ->
+    {{server_ref_global, GlobalName}, make_ref()};
+build_server_ref({some, {via, Mod, Term}}) ->
+    {{server_ref_via, Mod, Term}, make_ref()}.
 
 -doc """
 Always advertise `handle_event_function` + `state_enter`.
@@ -574,15 +599,45 @@ subject_to_pid({named_subject, Name}) ->
     end.
 
 -doc """
-Sends an asynchronous `cast` to a running `gen_statem` process.
+Sends an asynchronous `cast` to a running `gen_statem` via its `ServerRef`.
 
-Extracts the `Pid` from the Gleam Subject and calls `gen_statem:cast/2`.
-The message arrives in `handle_event/4` with `EventType=cast` and is
-converted to `Cast(Msg)` for the Gleam handler.
+Resolves the ref to the appropriate `gen_statem`-compatible target and calls
+`gen_statem:cast/2`. The message arrives in `handle_event/4` with
+`EventType=cast` and is converted to `Cast(Msg)` for the Gleam handler.
 """.
-cast(Subject, Msg) ->
-    gen_statem:cast(subject_to_pid(Subject), Msg),
+cast(ServerRef, Msg) ->
+    gen_statem:cast(ref_target(ServerRef), Msg),
     nil.
+
+-doc """
+Resolve a `ServerRef` to the target shape accepted by `gen_statem:cast/2`,
+`gen_statem:call/3`, and `gen_statem:send_request/2`.
+""".
+-spec ref_target(tuple()) -> pid() | atom() | {global, atom()} | {via, atom(), term()}.
+ref_target({server_ref_subject, {subject, Pid, _Tag}}) -> Pid;
+ref_target({server_ref_subject, {named_subject, Name}}) -> Name;
+ref_target({server_ref_global, Name}) -> {global, Name};
+ref_target({server_ref_via, Mod, Term}) -> {via, Mod, Term};
+ref_target({server_ref_pid, Pid}) -> Pid.
+
+-doc """
+Extract the `Subject(message)` underlying a `ServerRef`. Succeeds for refs
+returned by unnamed and `Local`-named starts; returns `{error, nil}` for
+`Global`, `Via`, or raw-Pid refs.
+""".
+-spec ref_to_subject(tuple()) -> {ok, tuple()} | {error, nil}.
+ref_to_subject({server_ref_subject, Subject}) -> {ok, Subject};
+ref_to_subject(_) -> {error, nil}.
+
+-doc "Wrap an existing Gleam `Subject(message)` as a `ServerRef(message)`.".
+ref_from_subject(Subject) -> {server_ref_subject, Subject}.
+
+-doc """
+Wrap a raw `Pid` as a `ServerRef(message)`. Suitable for `cast` and
+`send_request`; not convertible back to a `Subject` because no subject tag
+is associated.
+""".
+ref_from_pid(Pid) when is_pid(Pid) -> {server_ref_pid, Pid}.
 
 -doc "Stop a running state machine with reason `normal`.".
 stop_server(Subject) ->
@@ -668,25 +723,15 @@ request id. The server receives a `Call(from, msg)` event and must respond
 with a `Reply(from, value)` action. Use `receive_response/2` to collect the
 reply when ready.
 """.
-send_request({subject, Pid, _Tag}, Msg) ->
-    gen_statem:send_request(Pid, Msg);
-send_request({named_subject, Name}, Msg) ->
-    case erlang:whereis(Name) of
-        Pid when is_pid(Pid) -> gen_statem:send_request(Pid, Msg);
-        undefined -> error({noproc, Name})
-    end.
+send_request(ServerRef, Msg) ->
+    gen_statem:send_request(ref_target(ServerRef), Msg).
 
 -doc """
 Like `send_request/2` but also adds the resulting request id (under `Label`)
 to `Collection`, returning the updated collection.
 """.
-send_request_to_collection({subject, Pid, _Tag}, Msg, Label, Collection) ->
-    gen_statem:send_request(Pid, Msg, Label, Collection);
-send_request_to_collection({named_subject, Name}, Msg, Label, Collection) ->
-    case erlang:whereis(Name) of
-        Pid when is_pid(Pid) -> gen_statem:send_request(Pid, Msg, Label, Collection);
-        undefined -> error({noproc, Name})
-    end.
+send_request_to_collection(ServerRef, Msg, Label, Collection) ->
+    gen_statem:send_request(ref_target(ServerRef), Msg, Label, Collection).
 
 -doc """
 Waits up to `Timeout` milliseconds for the reply to a single `ReqId`.

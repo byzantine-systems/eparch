@@ -21,10 +21,10 @@ pub type Msg {
 
 // API
 /// Start the pushbutton with press count at 0 and initial state Off.
-pub fn start() -> Result(sm.Started(process.Subject(Msg)), sm.StartError) {
+pub fn start() -> Result(sm.Started(Msg), sm.StartError) {
   sm.new(Off, 0)
   |> sm.on_event(handle_event)
-  |> sm.start
+  |> sm.start_link
 }
 
 /// Toggle the button and return the count *before* the toggle.
