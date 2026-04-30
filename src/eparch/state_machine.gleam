@@ -1023,3 +1023,74 @@ pub fn receive_response_collection(
   timeout: Int,
   handling: ResponseHandling,
 ) -> CollectionResponse(reply, label)
+
+/// Stop a running state machine from the client with reason `normal`.
+///
+@external(erlang, "statem_ffi", "stop_server")
+pub fn stop_server(subject: Subject(message)) -> Nil
+
+/// Stop a running state machine from the client with a custom reason and timeout (ms).
+///
+@external(erlang, "statem_ffi", "stop_server_with")
+pub fn stop_server_with(
+  subject: Subject(message),
+  reason: ExitReason,
+  timeout: Int,
+) -> Nil
+
+/// Send a reply to a caller from outside the state machine callback.
+///
+/// Unlike the `Reply` action (which replies inside the callback), this can
+/// be called from any process that holds a `From` value.
+///
+@external(erlang, "statem_ffi", "send_reply")
+pub fn send_reply(from: From(reply), response: reply) -> Nil
+
+/// Send multiple replies at once from outside the callback.
+///
+@external(erlang, "statem_ffi", "send_replies")
+pub fn send_replies(replies: List(#(From(reply), reply))) -> Nil
+
+/// Block indefinitely until a reply arrives for a `RequestId`.
+///
+/// Since OTP 23.
+///
+@external(erlang, "statem_ffi", "wait_response")
+pub fn wait_response(
+  request_id: RequestId(reply),
+) -> Result(reply, ReceiveError)
+
+/// Block indefinitely until the reply to a `RequestId` arrives, using
+/// `gen_statem:receive_response/1`. Equivalent to `receive_response` with
+/// no timeout, complementing the timeout-bounded `receive_response/2`.
+///
+/// Requires Erlang/OTP 24 or later.
+///
+@external(erlang, "statem_ffi", "receive_response_blocking")
+pub fn receive_response_blocking(
+  request_id: RequestId(reply),
+) -> Result(reply, ReceiveError)
+
+/// Block until a reply arrives or the timeout (ms) expires.
+///
+/// Since OTP 23.
+///
+@external(erlang, "statem_ffi", "wait_response_timeout")
+pub fn wait_response_timeout(
+  request_id: RequestId(reply),
+  timeout: Int,
+) -> Result(reply, ReceiveError)
+
+/// Check whether a received message is the reply for a `RequestId`.
+///
+/// - `Ok(Some(reply))`: the message is the reply
+/// - `Ok(None)`: the message is unrelated to this request
+/// - `Error(ReceiveError)`: the server crashed
+///
+/// Since OTP 23.
+///
+@external(erlang, "statem_ffi", "check_response")
+pub fn check_response(
+  message: Dynamic,
+  request_id: RequestId(reply),
+) -> Result(Option(reply), ReceiveError)
