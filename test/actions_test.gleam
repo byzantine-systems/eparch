@@ -12,6 +12,7 @@ import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
 import gleam/list
+import gleam/option
 import gleam/string
 import gleeunit/should
 
@@ -969,4 +970,209 @@ pub fn machine_without_format_status_still_appears_in_status_test() {
   // Should not crash; sys:get_status returns a non-empty term.
   let _ = sys_get_status(machine.pid)
   Nil
+}
+
+// CLIENT API WRAPPERS (issue #32): stop_server, send_reply(s), wait_response,
+// check_response, receive_response_blocking.
+
+type ClientState {
+  ClientRunning
+}
+
+type ClientMsg {
+  CliGet
+  // CliAsk parks the caller's From in an external stash so the test process
+  // can reply with send_reply / send_replies from outside the callback.
+  CliAsk(stash: process.Subject(state_machine.From(Int)))
+  // CliNoReply intentionally leaves the call without a reply, used to drive
+  // wait_response_timeout into ReceiveTimeout.
+  CliNoReply
+}
+
+fn client_handler(
+  event: state_machine.Event(ClientState, ClientMsg, Int),
+  _state: ClientState,
+  data: Int,
+) -> state_machine.Step(ClientState, Int, ClientMsg, Int) {
+  case event {
+    state_machine.Call(from, CliGet) ->
+      state_machine.keep_state(data, [state_machine.Reply(from, data)])
+    state_machine.Call(from, CliAsk(stash)) -> {
+      process.send(stash, from)
+      state_machine.keep_state(data, [])
+    }
+    state_machine.Call(_from, CliNoReply) -> state_machine.keep_state(data, [])
+    _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn stop_server_terminates_machine_with_normal_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let monitor = process.monitor(machine.pid)
+  let sel =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(d) { d })
+
+  state_machine.stop_server(machine.data)
+
+  let assert Ok(down) = process.selector_receive(sel, 1000)
+  down.reason |> should.equal(process.Normal)
+}
+
+pub fn stop_server_with_custom_reason_test() {
+  // gen_statem:start_link links the machine to the test process, so a
+  // non-normal exit reason propagates here and proc_lib:stop/3 also raises
+  // for non-normal reasons. Trap exits so the test process survives.
+  process.trap_exits(True)
+
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let monitor = process.monitor(machine.pid)
+  let sel =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(d) { d })
+
+  let reason = process.Abnormal(dynamic.string("shutdown_requested"))
+  let _ =
+    process.spawn_unlinked(fn() {
+      state_machine.stop_server_with(machine.data, reason, 1000)
+    })
+
+  // The exact reason round-tripping through gleam_erlang's monitor decoder
+  // is governed by the existing convert_exit_reason/cast_exit_reason pair;
+  // here we just confirm the 3-arg call drives the machine to terminate.
+  let assert Ok(process.ProcessDown(pid: down_pid, ..)) =
+    process.selector_receive(sel, 1000)
+  down_pid |> should.equal(machine.pid)
+
+  process.flush_messages()
+  process.trap_exits(False)
+}
+
+pub fn send_reply_from_external_process_completes_call_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let stash: process.Subject(state_machine.From(Int)) = process.new_subject()
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliAsk(stash))
+
+  let assert Ok(from) = process.receive(stash, 1000)
+  state_machine.send_reply(from, 123)
+
+  let assert Ok(reply) = state_machine.receive_response(req, 1000)
+  reply |> should.equal(123)
+}
+
+pub fn send_replies_completes_multiple_calls_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let stash: process.Subject(state_machine.From(Int)) = process.new_subject()
+
+  let req1: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliAsk(stash))
+  let req2: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliAsk(stash))
+
+  let assert Ok(from1) = process.receive(stash, 1000)
+  let assert Ok(from2) = process.receive(stash, 1000)
+
+  state_machine.send_replies([#(from1, 1), #(from2, 2)])
+
+  let assert Ok(r1) = state_machine.receive_response(req1, 1000)
+  let assert Ok(r2) = state_machine.receive_response(req2, 1000)
+  r1 |> should.equal(1)
+  r2 |> should.equal(2)
+}
+
+pub fn wait_response_returns_reply_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 99)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliGet)
+  let assert Ok(value) = state_machine.wait_response(req)
+  value |> should.equal(99)
+}
+
+pub fn wait_response_timeout_yields_receive_timeout_when_no_reply_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliNoReply)
+
+  state_machine.wait_response_timeout(req, 50)
+  |> should.equal(Error(state_machine.ReceiveTimeout))
+}
+
+pub fn check_response_returns_none_for_unrelated_message_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliGet)
+
+  // An int dynamic is not a gen_statem reply tuple.
+  let unrelated = dynamic.int(42)
+  state_machine.check_response(unrelated, req)
+  |> should.equal(Ok(option.None))
+
+  // Drain the real reply so the mailbox is clean for the next test.
+  let _ = state_machine.receive_response(req, 1000)
+}
+
+pub fn check_response_returns_some_for_matching_reply_test() {
+  process.flush_messages()
+
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 11)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliGet)
+
+  let selector =
+    process.new_selector()
+    |> process.select_other(fn(msg) { msg })
+  let assert Ok(raw) = process.selector_receive(from: selector, within: 1000)
+
+  case state_machine.check_response(raw, req) {
+    Ok(option.Some(value)) -> value |> should.equal(11)
+    other -> {
+      string.inspect(other) |> should.equal("Ok(Some(11))")
+      Nil
+    }
+  }
+}
+
+pub fn receive_response_blocking_returns_reply_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 7)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start
+
+  let req: state_machine.RequestId(Int) =
+    state_machine.send_request(machine.data, CliGet)
+  let assert Ok(value) = state_machine.receive_response_blocking(req)
+  value |> should.equal(7)
 }

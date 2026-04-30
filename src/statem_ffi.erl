@@ -9,6 +9,16 @@ gen_statem behavior callbacks and Gleam's type-safe API.
 %% Public API
 -export([do_start/9, cast/2]).
 -export([
+    stop_server/1,
+    stop_server_with/3,
+    send_reply/2,
+    send_replies/1,
+    wait_response/1,
+    wait_response_timeout/2,
+    check_response/2,
+    receive_response_blocking/1
+]).
+-export([
     reqids_new/0,
     reqids_add/3,
     reqids_size/1,
@@ -555,6 +565,14 @@ convert_action_to_erlang(Action) ->
             pop_callback_module
     end.
 
+subject_to_pid({subject, Pid, _Tag}) ->
+    Pid;
+subject_to_pid({named_subject, Name}) ->
+    case erlang:whereis(Name) of
+        Pid when is_pid(Pid) -> Pid;
+        undefined -> error({noproc, Name})
+    end.
+
 -doc """
 Sends an asynchronous `cast` to a running `gen_statem` process.
 
@@ -563,18 +581,66 @@ The message arrives in `handle_event/4` with `EventType=cast` and is
 converted to `Cast(Msg)` for the Gleam handler.
 """.
 cast(Subject, Msg) ->
-    Pid =
-        case Subject of
-            {subject, P, _Tag} ->
-                P;
-            {named_subject, Name} ->
-                case erlang:whereis(Name) of
-                    P when is_pid(P) -> P;
-                    undefined -> error({noproc, Name})
-                end
-        end,
-    gen_statem:cast(Pid, Msg),
+    gen_statem:cast(subject_to_pid(Subject), Msg),
     nil.
+
+-doc "Stop a running state machine with reason `normal`.".
+stop_server(Subject) ->
+    gen_statem:stop(subject_to_pid(Subject)),
+    nil.
+
+-doc "Stop a running state machine with a custom reason and timeout (ms).".
+stop_server_with(Subject, Reason, Timeout) ->
+    gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), Timeout),
+    nil.
+
+-doc "Send a reply to a caller from outside the state machine callback.".
+send_reply(From, Reply) ->
+    gen_statem:reply(From, Reply),
+    nil.
+
+-doc """
+Send multiple replies at once.
+Gleam's #(From, Reply) tuples are {From, Reply} in Erlang and must be
+converted to gen_statem reply actions {reply, From, Reply}.
+""".
+send_replies(Replies) ->
+    Actions = [{reply, F, R} || {F, R} <- Replies],
+    gen_statem:reply(Actions),
+    nil.
+
+-doc "Block indefinitely until a reply arrives. Since OTP 23.".
+wait_response(ReqId) ->
+    case gen_statem:wait_response(ReqId) of
+        {reply, Reply} -> {ok, Reply};
+        {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+    end.
+
+-doc "Block until a reply arrives or the timeout (ms) expires. Since OTP 23.".
+wait_response_timeout(ReqId, Timeout) ->
+    case gen_statem:wait_response(ReqId, Timeout) of
+        {reply, Reply} -> {ok, Reply};
+        timeout -> {error, receive_timeout};
+        {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+    end.
+
+-doc "Block indefinitely waiting for the reply to a single ReqId. Since OTP 24.".
+receive_response_blocking(ReqId) ->
+    case gen_statem:receive_response(ReqId) of
+        {reply, Reply} -> {ok, Reply};
+        {error, {Reason, _ServerRef}} -> {error, {request_crashed, classify_reason(Reason)}}
+    end.
+
+-doc """
+Check if a received message is the reply for a request. Since OTP 23.
+Returns {ok, {some, Reply}}, {ok, none}, or {error, StopReason}.
+""".
+check_response(Msg, ReqId) ->
+    case gen_statem:check_response(Msg, ReqId) of
+        {reply, Reply} -> {ok, {some, Reply}};
+        no_reply -> {ok, none};
+        {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+    end.
 
 %%%===================================================================
 %%% reqids API — OTP 25.0+
