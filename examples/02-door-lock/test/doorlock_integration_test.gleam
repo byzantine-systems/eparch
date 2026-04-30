@@ -10,6 +10,7 @@
 ////
 
 import doorlock
+import eparch/state_machine as sm
 import gleam/erlang/process
 import gleeunit/should
 
@@ -19,13 +20,15 @@ const code = "secret"
 /// Start a lock with the default 5-second auto-lock.
 fn start() -> process.Subject(doorlock.Message) {
   let assert Ok(machine) = doorlock.start(code)
-  machine.data
+  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
+  subject
 }
 
 /// Start a lock with a short auto-lock for timeout tests.
 fn start_fast() -> process.Subject(doorlock.Message) {
   let assert Ok(machine) = doorlock.start_with_lock_timeout(code, 100)
-  machine.data
+  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
+  subject
 }
 
 // Tests

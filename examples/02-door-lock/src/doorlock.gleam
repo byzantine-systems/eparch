@@ -22,9 +22,7 @@ pub type Message {
 
 // Public API
 /// Start the door lock with a 5-second auto-lock timeout.
-pub fn start(
-  code: String,
-) -> Result(sm.Started(process.Subject(Message)), sm.StartError) {
+pub fn start(code: String) -> Result(sm.Started(Message), sm.StartError) {
   start_with_lock_timeout(code, 5000)
 }
 
@@ -34,13 +32,13 @@ pub fn start(
 pub fn start_with_lock_timeout(
   code: String,
   auto_lock_ms: Int,
-) -> Result(sm.Started(process.Subject(Message)), sm.StartError) {
+) -> Result(sm.Started(Message), sm.StartError) {
   sm.new(Locked, Data(code, 0))
   |> sm.on_event(fn(event, state, data) {
     handle_event(auto_lock_ms, event, state, data)
   })
   |> sm.with_state_enter()
-  |> sm.start
+  |> sm.start_link
 }
 
 /// Send a code to the lock and wait for the result.
