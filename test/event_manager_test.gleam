@@ -22,8 +22,58 @@ fn sys_get_status(pid: process.Pid) -> Dynamic
 // ---------------------------------------------------------------------------
 
 pub fn start_and_stop_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
   event_manager.stop(mgr)
+}
+
+pub fn start_link_with_local_name_registers_process_test() {
+  let name = process.new_name("eparch_event_manager_start_link_test_")
+  let options =
+    event_manager.new_start_options()
+    |> event_manager.with_name(event_manager.Local(name))
+
+  let assert Ok(mgr) = event_manager.start_link(options)
+
+  let assert Ok(registered_pid) = process.named(name)
+  registered_pid |> should.equal(event_manager.manager_pid(mgr))
+
+  event_manager.stop(mgr)
+}
+
+pub fn start_link_already_started_returns_error_test() {
+  let name = process.new_name("eparch_event_manager_start_link_dup_test_")
+  let options =
+    event_manager.new_start_options()
+    |> event_manager.with_name(event_manager.Local(name))
+
+  let assert Ok(mgr) = event_manager.start_link(options)
+  let first_pid = event_manager.manager_pid(mgr)
+
+  let assert Error(event_manager.AlreadyStarted(reported_pid)) =
+    event_manager.start_link(options)
+  reported_pid |> should.equal(first_pid)
+
+  event_manager.stop(mgr)
+}
+
+pub fn start_unlinked_does_not_propagate_crash_test() {
+  let assert Ok(mgr) = event_manager.start(event_manager.new_start_options())
+  let mgr_pid = event_manager.manager_pid(mgr)
+
+  let monitor = process.monitor(mgr_pid)
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(down) { down })
+
+  // Kill the manager untrappably. With no link, the test process is
+  // unaffected and continues past selector_receive.
+  process.kill(mgr_pid)
+  let assert Ok(_down) = process.selector_receive(selector, 1000)
+
+  // Reaching this point proves the test process did not exit alongside the
+  // manager, i.e. start/1 did not establish a link.
+  process.self() |> should.not_equal(mgr_pid)
 }
 
 // ---------------------------------------------------------------------------
@@ -38,7 +88,8 @@ type NotifyMsg {
 }
 
 pub fn notify_delivers_event_to_handler_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(Nil, fn(event, state) {
@@ -73,7 +124,8 @@ type SyncMsg {
 }
 
 pub fn sync_notify_blocks_until_handler_processes_event_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(Nil, fn(event, state) {
@@ -108,7 +160,8 @@ type MultiMsg {
 }
 
 pub fn multiple_handlers_both_receive_broadcast_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let make_handler = fn(tag: String) {
     event_manager.new_handler(Nil, fn(event, state) {
@@ -149,7 +202,8 @@ type RemoveSelfMsg {
 }
 
 pub fn handler_removes_itself_via_remove_step_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let counter_handler =
     event_manager.new_handler(Nil, fn(event, _state) {
@@ -179,7 +233,8 @@ pub fn handler_removes_itself_via_remove_step_test() {
 // ---------------------------------------------------------------------------
 
 pub fn explicit_remove_handler_removes_by_ref_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let h =
     event_manager.new_handler(Nil, fn(_event, state) {
@@ -203,7 +258,8 @@ pub fn explicit_remove_handler_removes_by_ref_test() {
 // ---------------------------------------------------------------------------
 
 pub fn which_handlers_reflects_add_and_remove_operations_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let make_h = fn() {
     event_manager.new_handler(Nil, fn(_event, state) {
@@ -243,7 +299,8 @@ type TerminateMsg {
 }
 
 pub fn on_terminate_called_when_handler_removed_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let reply_sub = process.new_subject()
 
@@ -275,7 +332,8 @@ pub fn on_terminate_called_when_handler_removed_test() {
 // ---------------------------------------------------------------------------
 
 pub fn on_format_status_overrides_state_in_status_report_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let h =
     event_manager.new_handler(42, fn(_event, state) {
@@ -294,7 +352,8 @@ pub fn on_format_status_overrides_state_in_status_report_test() {
 }
 
 pub fn handler_without_format_status_still_appears_in_status_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let h =
     event_manager.new_handler(Nil, fn(_event, state) {
@@ -366,7 +425,7 @@ pub fn start_monitor_with_name_registers_process_test() {
   let name = process.new_name("eparch_event_manager_test_")
   let options =
     event_manager.new_start_options()
-    |> event_manager.with_name(name)
+    |> event_manager.with_name(event_manager.Local(name))
 
   let assert Ok(monitored) = event_manager.start_monitor(options)
 
@@ -386,7 +445,7 @@ pub fn start_monitor_already_started_returns_error_test() {
   let name = process.new_name("eparch_event_manager_dup_test_")
   let options =
     event_manager.new_start_options()
-    |> event_manager.with_name(name)
+    |> event_manager.with_name(event_manager.Local(name))
 
   let assert Ok(monitored) = event_manager.start_monitor(options)
   let first_pid = event_manager.manager_pid(monitored.manager)
@@ -433,7 +492,8 @@ type CallMsg {
 }
 
 pub fn send_request_returns_reply_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(0, fn(event, count) {
@@ -460,7 +520,8 @@ pub fn send_request_returns_reply_test() {
 }
 
 pub fn send_request_sees_latest_handler_state_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(0, fn(event, count) {
@@ -490,7 +551,8 @@ pub fn send_request_sees_latest_handler_state_test() {
 }
 
 pub fn wait_response_returns_same_reply_as_receive_response_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(42, fn(_event, state) {
@@ -509,7 +571,8 @@ pub fn wait_response_returns_same_reply_as_receive_response_test() {
 }
 
 pub fn check_response_returns_check_no_reply_for_unrelated_message_test() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(0, fn(_event, state) {
@@ -538,7 +601,8 @@ pub fn check_response_returns_check_got_reply_when_message_matches_test() {
   // tests) so that the select_other catch-all below doesn't capture them.
   process.flush_messages()
 
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
 
   let handler =
     event_manager.new_handler(7, fn(_event, state) {

@@ -19,7 +19,8 @@ every installed instance distinguishable.
 
 %% Public API (called from Gleam via @external)
 -export([
-    do_start/0,
+    do_start_link/1,
+    do_start_no_link/1,
     do_start_monitor/1,
     do_stop/1,
     do_manager_pid/1,
@@ -71,31 +72,49 @@ every installed instance distinguishable.
 -doc """
 Start a `gen_event` manager linked to the calling process.
 
-Returns a `Manager(event)` value, which at the Erlang level is just 
-the Pid of the manager process.
-""".
-do_start() ->
-    case gen_event:start_link() of
-        {ok, Pid} ->
-            {ok, Pid};
-        {error, {already_started, Pid}} ->
-            {error, {already_started, Pid}};
-        {error, Reason} ->
-            {error, {start_failed, format_reason(Reason)}}
-    end.
-
--doc """
-Start a gen_event manager with an atomic monitor (OTP 23.0+).
-
 The Gleam side passes an opaque `StartOptions` record, encoded at the Erlang
 level as:
 
     {start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}
 
-`NameOpt` is `none | {some, Name}`; `Timeout`/`HibernateAfter` are
-`infinity | {milliseconds, Ms}`; the two list fields are empty when unused.
-Returns the `MonitoredManager(manager, monitor)` 3-tuple the Gleam compiler
-expects.
+`NameOpt` is `none | {some, ServerName}` where `ServerName` arrives as the
+canonical gen_event tuple shape: `{local, atom()}`, `{global, atom()}`, or
+`{via, atom(), term()}`. Returns a `Manager(event)` value (a Pid at the
+Erlang level) on success.
+""".
+do_start_link({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}) ->
+    ErlangOpts = build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts),
+    Result =
+        case NameOpt of
+            none ->
+                gen_event:start_link(ErlangOpts);
+            {some, ServerName} ->
+                gen_event:start_link(ServerName, ErlangOpts)
+        end,
+    convert_start_result(Result).
+
+-doc """
+Start a `gen_event` manager without linking it to the calling process.
+
+Same options encoding as `do_start_link/1`. Useful when the parent will
+install its own monitor or hand the manager to a custom supervisor.
+""".
+do_start_no_link({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}) ->
+    ErlangOpts = build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts),
+    Result =
+        case NameOpt of
+            none ->
+                gen_event:start(ErlangOpts);
+            {some, ServerName} ->
+                gen_event:start(ServerName, ErlangOpts)
+        end,
+    convert_start_result(Result).
+
+-doc """
+Start a gen_event manager with an atomic monitor (OTP 23.0+).
+
+Same options encoding as `do_start_link/1`. Returns the
+`MonitoredManager(manager, monitor)` 3-tuple the Gleam compiler expects.
 """.
 do_start_monitor({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, SpawnOpts}) ->
     ErlangOpts = build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts),
@@ -103,17 +122,24 @@ do_start_monitor({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, S
         case NameOpt of
             none ->
                 gen_event:start_monitor(ErlangOpts);
-            {some, Name} ->
-                gen_event:start_monitor({local, Name}, ErlangOpts)
+            {some, ServerName} ->
+                gen_event:start_monitor(ServerName, ErlangOpts)
         end,
-    case Result of
-        {ok, {Pid, MonitorRef}} ->
-            {ok, {monitored_manager, Pid, MonitorRef}};
-        {error, {already_started, Pid}} ->
-            {error, {already_started, Pid}};
-        {error, Reason} ->
-            {error, {start_failed, format_reason(Reason)}}
-    end.
+    convert_monitor_result(Result).
+
+convert_start_result({ok, Pid}) ->
+    {ok, Pid};
+convert_start_result({error, {already_started, Pid}}) ->
+    {error, {already_started, Pid}};
+convert_start_result({error, Reason}) ->
+    {error, {start_failed, format_reason(Reason)}}.
+
+convert_monitor_result({ok, {Pid, MonitorRef}}) ->
+    {ok, {monitored_manager, Pid, MonitorRef}};
+convert_monitor_result({error, {already_started, Pid}}) ->
+    {error, {already_started, Pid}};
+convert_monitor_result({error, Reason}) ->
+    {error, {start_failed, format_reason(Reason)}}.
 
 build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts) ->
     [
