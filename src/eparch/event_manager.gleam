@@ -17,7 +17,7 @@
 ////
 //// type MyEvent { LogLine(String) | Flush(process.Subject(Nil)) }
 ////
-//// case event_manager.start() {
+//// case event_manager.start_link(event_manager.new_start_options()) {
 ////   Ok(manager) -> {
 ////     let handler =
 ////       event_manager.new_handler(0, fn(event, count) {
@@ -41,6 +41,7 @@ import eparch/start_options.{
   type DebugFlag, type SpawnOption, type Timeout, Infinity,
 }
 import gleam/dynamic.{type Dynamic}
+import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
 
@@ -68,12 +69,27 @@ pub type StartError {
   StartFailed(reason: String)
 }
 
-/// Options for `start_monitor`. Build a value with `new_start_options()` and
-/// extend it using the `with_*` setter functions.
+/// A name under which an event manager can be registered.
+///
+/// Mirrors `gen_event:emgr_name/0`:
+/// - `Local(name)` registers locally with `erlang:register/2` and gives back
+///   a `process.Name(event)` you can turn into a `Subject(event)`.
+/// - `Global(name)` registers across nodes via the `global` module.
+/// - `Via(module, name)` dispatches registration through any module
+///   implementing the `via` registry behaviour (e.g. `gproc`, `syn`).
+///
+pub type ServerName(event) {
+  Local(name: Name(event))
+  Global(name: Atom)
+  Via(module: Atom, name: Dynamic)
+}
+
+/// Options for `start_link`, `start`, and `start_monitor`. Build a value with
+/// `new_start_options()` and extend it using the `with_*` setter functions.
 ///
 pub opaque type StartOptions(event) {
   StartOptions(
-    name: Option(Name(event)),
+    name: Option(ServerName(event)),
     timeout: Timeout,
     hibernate_after: Timeout,
     debug: List(DebugFlag),
@@ -134,9 +150,10 @@ pub type HandlerRef(request, reply)
 
 /// An opaque reference to a running event manager process.
 ///
-/// Values of this type are produced by `start` (directly) and `start_monitor`
-/// (as the `manager` field of the returned `MonitoredManager`). Pass them to
-/// `notify`, `sync_notify`, `add_handler`, etc.
+/// Values of this type are produced by `start_link` and `start` (directly)
+/// and by `start_monitor` (as the `manager` field of the returned
+/// `MonitoredManager`). Pass them to `notify`, `sync_notify`, `add_handler`,
+/// etc.
 ///
 pub type Manager(event)
 
@@ -250,13 +267,16 @@ pub fn new_start_options() -> StartOptions(event) {
   )
 }
 
-/// Register the manager under a local name. Gives callers a
-/// `process.Name(event)` they can turn into a `Subject` or look up with
-/// `process.named/1`.
+/// Register the manager under a name when it starts.
+///
+/// Pass `Local(name)` for the common local-atom registration (the only form
+/// compatible with a `process.Subject`), `Global(name)` for cluster-wide
+/// registration via the `global` module, or `Via(module, term)` for a
+/// custom registry such as `gproc` or `syn`.
 ///
 pub fn with_name(
   options: StartOptions(event),
-  name: Name(event),
+  name: ServerName(event),
 ) -> StartOptions(event) {
   StartOptions(..options, name: Some(name))
 }
@@ -305,10 +325,14 @@ pub fn with_spawn_options(
 
 /// Start an event manager process linked to the caller.
 ///
+/// Maps to `gen_event:start_link/1,2`. Use `with_name` on the options to
+/// register the manager under a `Local`, `Global`, or `Via` name; otherwise
+/// the manager is started anonymously.
+///
 /// ## Example
 ///
 /// ```gleam
-/// case event_manager.start() {
+/// case event_manager.start_link(event_manager.new_start_options()) {
 ///   Ok(manager) -> {
 ///     // ... use manager ...
 ///     event_manager.stop(manager)
@@ -317,20 +341,49 @@ pub fn with_spawn_options(
 /// }
 /// ```
 ///
-pub fn start() -> Result(Manager(event), StartError) {
-  do_start()
+/// ## Example: registered under a local name
+///
+/// ```gleam
+/// let name = process.new_name("my_event_manager")
+/// let options =
+///   event_manager.new_start_options()
+///   |> event_manager.with_name(event_manager.Local(name))
+/// let assert Ok(manager) = event_manager.start_link(options)
+/// ```
+///
+pub fn start_link(
+  options: StartOptions(event),
+) -> Result(Manager(event), StartError) {
+  do_start_link(options)
 }
 
-@external(erlang, "event_manager_ffi", "do_start")
-fn do_start() -> Result(Manager(event), StartError)
+@external(erlang, "event_manager_ffi", "do_start_link")
+fn do_start_link(
+  options: StartOptions(event),
+) -> Result(Manager(event), StartError)
+
+/// Start an event manager process without linking it to the caller.
+///
+/// Maps to `gen_event:start/1,2`. Useful when the parent does not want
+/// link-based crash propagation, e.g. when the parent will install its own
+/// monitor or hand the manager to a custom supervisor.
+///
+pub fn start(options: StartOptions(event)) -> Result(Manager(event), StartError) {
+  do_start_no_link(options)
+}
+
+@external(erlang, "event_manager_ffi", "do_start_no_link")
+fn do_start_no_link(
+  options: StartOptions(event),
+) -> Result(Manager(event), StartError)
 
 /// Start an event manager linked to the caller and atomically return a
 /// monitor for it.
 ///
-/// Equivalent to calling `start()` followed by `process.monitor(manager_pid)`,
-/// but without the race window between the two calls. The returned
-/// `MonitoredManager` carries both the `Manager` and a `process.Monitor` you
-/// can select on. Since OTP 23.0.
+/// Equivalent to calling `start_link(options)` followed by
+/// `process.monitor(manager_pid)`, but without the race window between the
+/// two calls. The returned `MonitoredManager` carries both the `Manager` and
+/// a `process.Monitor` you can select on. Since OTP 23.0.
 ///
 /// ## Example
 ///
