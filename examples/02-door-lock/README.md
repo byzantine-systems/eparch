@@ -1,6 +1,6 @@
 # Door Lock
 
-Door Lock example for the `eparch/state_machine`.
+Door Lock example for the `eparch/state_machine`. Based on the [Door Lock](https://www.erlang.org/doc/system/statem.html#example) example from the OTP docs.
 
 ```mermaid
 stateDiagram
