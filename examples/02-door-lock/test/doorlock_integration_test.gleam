@@ -2,8 +2,8 @@
 //// Integration tests for the door lock state machine.
 ////
 //// These tests spawn a real gen_statem process and exercise the full
-//// message-passing lifecycle: `enter_code`, `get_status`, and the
-//// auto-lock state timeout.
+//// message-passing lifecycle: `button` (cast), `get_status` (call), and
+//// the auto-lock state timeout.
 ////
 //// The auto-lock timeout is set to 100 ms (via `start_with_lock_timeout`)
 //// so timeout tests complete quickly without sleeping for 5 seconds.
@@ -15,87 +15,102 @@ import gleam/erlang/process
 import gleeunit/should
 
 // Constants & Helpers
-const code = "secret"
+const code = [1, 2, 3, 4]
 
 /// Start a lock with the default 5-second auto-lock.
-fn start() -> process.Subject(doorlock.Message) {
+fn start() -> sm.ServerRef(doorlock.Message) {
   let assert Ok(machine) = doorlock.start(code)
-  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
-  subject
+  machine.ref
 }
 
 /// Start a lock with a short auto-lock for timeout tests.
-fn start_fast() -> process.Subject(doorlock.Message) {
+fn start_fast() -> sm.ServerRef(doorlock.Message) {
   let assert Ok(machine) = doorlock.start_with_lock_timeout(code, 100)
-  let assert Ok(subject) = sm.ref_to_subject(machine.ref)
-  subject
+  machine.ref
 }
 
 // Tests
 /// A freshly started lock is in the Locked state.
 pub fn initial_state_is_locked_test() {
-  let subject = start()
-  doorlock.get_status(subject) |> should.equal(doorlock.Locked)
+  let ref = start()
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
 }
 
-/// The correct code unlocks the door and the status becomes Open.
-pub fn correct_code_opens_the_lock_test() {
-  let subject = start()
+/// Pressing the full correct sequence opens the lock.
+pub fn correct_sequence_opens_the_lock_test() {
+  let ref = start()
 
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
-  doorlock.get_status(subject) |> should.equal(doorlock.Open)
+  doorlock.enter_code(ref, code)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
-/// A wrong code returns an error and the door stays Locked.
-pub fn wrong_code_stays_locked_test() {
-  let subject = start()
+/// Pressing buttons one at a time also opens the lock.
+pub fn one_button_at_a_time_opens_the_lock_test() {
+  let ref = start()
 
-  doorlock.enter_code(subject, "wrong") |> should.equal(Error("Wrong code"))
-  doorlock.get_status(subject) |> should.equal(doorlock.Locked)
+  doorlock.button(ref, 1)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+  doorlock.button(ref, 2)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+  doorlock.button(ref, 3)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+  doorlock.button(ref, 4)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
-/// Multiple wrong codes all return errors; the door remains Locked throughout.
-pub fn multiple_wrong_codes_stay_locked_test() {
-  let subject = start()
+/// A wrong digit in the middle of the sequence resets the buffer.
+pub fn wrong_digit_resets_progress_test() {
+  let ref = start()
 
-  doorlock.enter_code(subject, "aaa") |> should.equal(Error("Wrong code"))
-  doorlock.enter_code(subject, "bbb") |> should.equal(Error("Wrong code"))
-  doorlock.enter_code(subject, "ccc") |> should.equal(Error("Wrong code"))
-  doorlock.get_status(subject) |> should.equal(doorlock.Locked)
+  // Two correct, then one wrong -> buffer resets, still Locked.
+  doorlock.button(ref, 1)
+  doorlock.button(ref, 2)
+  doorlock.button(ref, 9)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+
+  // Continuing with 3, 4 alone is not enough — we need the full code.
+  doorlock.button(ref, 3)
+  doorlock.button(ref, 4)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+
+  // Now the full correct sequence opens it.
+  doorlock.enter_code(ref, code)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
-/// When the door is already Open, entering a code returns Ok(Nil) without
-/// locking again (the auto-lock timer resets instead).
-pub fn enter_code_while_open_returns_ok_test() {
-  let subject = start()
+/// Button presses while Open are silently ignored.
+pub fn buttons_while_open_are_ignored_test() {
+  let ref = start()
 
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
-  // Door is now Open; entering code again should not error or deadlock.
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
-  doorlock.get_status(subject) |> should.equal(doorlock.Open)
+  doorlock.enter_code(ref, code)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
+
+  doorlock.button(ref, 9)
+  doorlock.button(ref, 9)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
 /// After the auto-lock timeout fires, the door transitions back to Locked.
 pub fn auto_lock_relocks_after_timeout_test() {
-  let subject = start_fast()
+  let ref = start_fast()
 
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
-  doorlock.get_status(subject) |> should.equal(doorlock.Open)
+  doorlock.enter_code(ref, code)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 
   // Wait long enough for the 100 ms state timeout to fire.
   process.sleep(250)
 
-  doorlock.get_status(subject) |> should.equal(doorlock.Locked)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
 }
 
-/// After auto-lock, the correct code can re-open the door.
+/// After auto-lock, the correct sequence can re-open the door.
 pub fn can_reopen_after_auto_lock_test() {
-  let subject = start_fast()
+  let ref = start_fast()
 
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
+  doorlock.enter_code(ref, code)
   process.sleep(250)
-  doorlock.get_status(subject) |> should.equal(doorlock.Locked)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
 
-  doorlock.enter_code(subject, code) |> should.equal(Ok(Nil))
-  doorlock.get_status(subject) |> should.equal(doorlock.Open)
+  doorlock.enter_code(ref, code)
+  doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
