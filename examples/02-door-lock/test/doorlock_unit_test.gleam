@@ -2,20 +2,20 @@
 //// Unit tests for the door lock event handler.
 ////
 //// These tests call `handle_event` directly without spawning a process,
-//// so they run fast and are deterministic. The reply subjects created
-//// with `process.new_subject()` let us verify that the handler sends the
-//// expected reply as a side-effect before returning its Step.
+//// so they run fast and are deterministic. They cover `Cast`, `Enter`,
+//// and `Timeout` events — the `Call(GetStatus)` path is covered by the
+//// integration tests because `From` is opaque and can only be produced
+//// by the gen_statem runtime.
 ////
 
 import doorlock
 import eparch/state_machine as sm
-import gleam/erlang/process
 import gleeunit/should
 
 // Constants & Helpers
-const code = "1234"
+const code = [1, 2, 3, 4]
 
-const data = doorlock.Data(code: "1234", attempts: 0)
+const data = doorlock.Data(code: [1, 2, 3, 4], remaining: [1, 2, 3, 4])
 
 const timeout_ms = 5000
 
@@ -23,81 +23,69 @@ fn call(event, state) {
   doorlock.handle_event(timeout_ms, event, state, data)
 }
 
-// EnterCode (Locked State)
-/// Correct code while Locked transitions to Open with no actions.
-/// The caller receives Ok(Nil) as a side-effect reply.
-pub fn enter_correct_code_transitions_to_open_test() {
-  let reply_sub = process.new_subject()
+// Button (Locked State)
+/// A correct prefix digit consumes one digit from `remaining`.
+pub fn correct_first_digit_consumes_one_test() {
+  let expected = doorlock.Data(code: code, remaining: [2, 3, 4])
 
-  call(sm.Info(doorlock.EnterCode(code, reply_sub)), doorlock.Locked)
-  |> should.equal(sm.NextState(doorlock.Open, data, []))
-
-  process.receive(reply_sub, 0)
-  |> should.equal(Ok(Ok(Nil)))
+  call(sm.Cast(doorlock.Button(1)), doorlock.Locked)
+  |> should.equal(sm.KeepState(expected, []))
 }
 
-/// Wrong code while Locked keeps the state and increments the attempt counter.
-/// The caller receives Error("Wrong code").
-pub fn enter_wrong_code_increments_attempts_test() {
-  let reply_sub = process.new_subject()
-  let expected_data = doorlock.Data(..data, attempts: 1)
+/// Completing the final digit transitions to Open and resets the buffer.
+pub fn final_correct_digit_opens_lock_test() {
+  let one_left = doorlock.Data(code: code, remaining: [4])
+  let reset = doorlock.Data(code: code, remaining: code)
 
-  call(sm.Info(doorlock.EnterCode("0000", reply_sub)), doorlock.Locked)
-  |> should.equal(sm.KeepState(expected_data, []))
-
-  process.receive(reply_sub, 0)
-  |> should.equal(Ok(Error("Wrong code")))
+  doorlock.handle_event(
+    timeout_ms,
+    sm.Cast(doorlock.Button(4)),
+    doorlock.Locked,
+    one_left,
+  )
+  |> should.equal(sm.NextState(doorlock.Open, reset, []))
 }
 
-/// Repeated wrong codes accumulate in the attempt counter.
-pub fn multiple_wrong_codes_accumulate_attempts_test() {
-  let reply_sub = process.new_subject()
+/// A wrong digit resets the buffer back to the full code.
+pub fn wrong_digit_resets_buffer_test() {
+  let partial = doorlock.Data(code: code, remaining: [3, 4])
+  let reset = doorlock.Data(code: code, remaining: code)
 
-  let step1 =
-    doorlock.handle_event(
-      timeout_ms,
-      sm.Info(doorlock.EnterCode("bad", reply_sub)),
-      doorlock.Locked,
-      data,
-    )
-  let assert sm.KeepState(data1, []) = step1
-
-  let step2 =
-    doorlock.handle_event(
-      timeout_ms,
-      sm.Info(doorlock.EnterCode("also_bad", reply_sub)),
-      doorlock.Locked,
-      data1,
-    )
-  let assert sm.KeepState(data2, []) = step2
-
-  data2.attempts |> should.equal(2)
+  doorlock.handle_event(
+    timeout_ms,
+    sm.Cast(doorlock.Button(9)),
+    doorlock.Locked,
+    partial,
+  )
+  |> should.equal(sm.KeepState(reset, []))
 }
 
-// EnterCode (Open State)
-/// Entering a code while already Open acknowledges with Ok(Nil) and keeps state.
-/// This avoids a process.call timeout when the caller doesn't know the door is open.
-pub fn enter_code_while_open_keeps_state_test() {
-  let reply_sub = process.new_subject()
-
-  call(sm.Info(doorlock.EnterCode(code, reply_sub)), doorlock.Open)
-  |> should.equal(sm.KeepState(data, []))
-
-  process.receive(reply_sub, 0)
-  |> should.equal(Ok(Ok(Nil)))
+// Button (Open State)
+/// Button presses while Open are silently ignored.
+pub fn button_while_open_is_noop_test() {
+  call(sm.Cast(doorlock.Button(1)), doorlock.Open)
+  |> should.equal(sm.KeepStateAndData([]))
 }
 
 // State Enter
+/// Entering the Locked state resets the digit buffer.
+pub fn entering_locked_resets_buffer_test() {
+  let partial = doorlock.Data(code: code, remaining: [3, 4])
+  let reset = doorlock.Data(code: code, remaining: code)
+
+  doorlock.handle_event(
+    timeout_ms,
+    sm.Enter(doorlock.Open),
+    doorlock.Locked,
+    partial,
+  )
+  |> should.equal(sm.KeepState(reset, []))
+}
+
 /// Entering the Open state arms the auto-lock timer.
 pub fn entering_open_state_sets_timeout_test() {
   call(sm.Enter(doorlock.Locked), doorlock.Open)
-  |> should.equal(sm.KeepState(data, [sm.StateTimeout(timeout_ms)]))
-}
-
-/// Entering the Locked state does nothing (no timer needed).
-pub fn entering_locked_state_is_noop_test() {
-  call(sm.Enter(doorlock.Open), doorlock.Locked)
-  |> should.equal(sm.KeepState(data, []))
+  |> should.equal(sm.KeepStateAndData([sm.StateTimeout(timeout_ms)]))
 }
 
 // State Timeout
@@ -110,37 +98,12 @@ pub fn state_timeout_while_open_transitions_to_locked_test() {
 /// A state timeout while already Locked is a no-op (catch-all branch).
 pub fn state_timeout_while_locked_is_noop_test() {
   call(sm.Timeout(sm.StateTimeoutType), doorlock.Locked)
-  |> should.equal(sm.KeepState(data, []))
+  |> should.equal(sm.KeepStateAndData([]))
 }
 
-// GetStatus
-/// GetStatus while Locked replies with Locked and keeps state.
-pub fn get_status_while_locked_test() {
-  let reply_sub = process.new_subject()
-
-  call(sm.Info(doorlock.GetStatus(reply_sub)), doorlock.Locked)
-  |> should.equal(sm.KeepState(data, []))
-
-  process.receive(reply_sub, 0)
-  |> should.equal(Ok(doorlock.Locked))
-}
-
-/// GetStatus while Open replies with Open and keeps state.
-pub fn get_status_while_open_test() {
-  let reply_sub = process.new_subject()
-
-  call(sm.Info(doorlock.GetStatus(reply_sub)), doorlock.Open)
-  |> should.equal(sm.KeepState(data, []))
-
-  process.receive(reply_sub, 0)
-  |> should.equal(Ok(doorlock.Open))
-}
-
-// Unknown Events
-/// Casts and other unrecognised events are silently ignored.
-pub fn unknown_events_are_ignored_test() {
-  let reply_sub = process.new_subject()
-
-  call(sm.Cast(doorlock.GetStatus(reply_sub)), doorlock.Locked)
-  |> should.equal(sm.KeepState(data, []))
+// Info / Unknown
+/// Info messages are silently ignored — the lock only listens to Cast and Call.
+pub fn info_events_are_ignored_test() {
+  call(sm.Info(doorlock.GetStatus), doorlock.Locked)
+  |> should.equal(sm.KeepStateAndData([]))
 }
