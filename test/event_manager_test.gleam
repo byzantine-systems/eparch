@@ -824,3 +824,307 @@ pub fn swap_supervised_handler_installs_new_ref_test() {
 
   event_manager.stop(mgr)
 }
+
+// ---------------------------------------------------------------------------
+// REQIDS COLLECTION (OTP 25+)
+//
+// Fan out N async requests to one or more handlers, batch them into a
+// RequestIdCollection, and drain the replies as they arrive.
+// ---------------------------------------------------------------------------
+
+type ReqMsg {
+  ReqGetCount
+}
+
+fn make_count_handler(initial: Int) {
+  event_manager.new_handler(initial, fn(_event, state) {
+    event_manager.Continue(state)
+  })
+  |> event_manager.with_call_handler(fn(_req, state) { #(state, state) })
+}
+
+pub fn request_ids_new_starts_empty_test() {
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+  event_manager.request_ids_size(collection) |> should.equal(0)
+}
+
+pub fn request_ids_size_reflects_pending_requests_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(0))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+  event_manager.request_ids_size(collection) |> should.equal(0)
+
+  let collection =
+    event_manager.send_request_to_collection(
+      mgr,
+      ref,
+      ReqGetCount,
+      "first",
+      collection,
+    )
+  event_manager.request_ids_size(collection) |> should.equal(1)
+
+  let collection =
+    event_manager.send_request_to_collection(
+      mgr,
+      ref,
+      ReqGetCount,
+      "second",
+      collection,
+    )
+  event_manager.request_ids_size(collection) |> should.equal(2)
+
+  let assert event_manager.GotReply(_, _, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  let assert event_manager.GotReply(_, _, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  event_manager.request_ids_size(collection) |> should.equal(0)
+
+  event_manager.stop(mgr)
+}
+
+pub fn receive_response_collection_drains_to_no_requests_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(7))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "a", c)
+    }
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "b", c)
+    }
+
+  let assert event_manager.GotReply(value1, _, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  let assert event_manager.GotReply(value2, _, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  value1 |> should.equal(7)
+  value2 |> should.equal(7)
+
+  event_manager.receive_response_collection(
+    collection,
+    100,
+    event_manager.Delete,
+  )
+  |> should.equal(event_manager.NoRequests)
+
+  event_manager.stop(mgr)
+}
+
+pub fn request_ids_to_list_contains_all_entries_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(0))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "x", c)
+    }
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "y", c)
+    }
+
+  let entries = event_manager.request_ids_to_list(collection)
+  list.length(entries) |> should.equal(2)
+  let labels =
+    list.map(entries, fn(pair) { pair.1 }) |> list.sort(string.compare)
+  labels |> should.equal(["x", "y"])
+
+  // Drain so the manager can shut down cleanly.
+  let assert event_manager.GotReply(_, _, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  let assert event_manager.GotReply(_, _, _) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+
+  event_manager.stop(mgr)
+}
+
+pub fn request_ids_add_inserts_existing_request_id_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(3))
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, ref, ReqGetCount)
+
+  let collection: event_manager.RequestIdCollection(Int, Int) =
+    event_manager.request_ids_new()
+    |> event_manager.request_ids_add(req, 1, _)
+
+  event_manager.request_ids_size(collection) |> should.equal(1)
+
+  let assert event_manager.GotReply(value, label, _) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  value |> should.equal(3)
+  label |> should.equal(1)
+
+  event_manager.stop(mgr)
+}
+
+pub fn receive_response_collection_returns_collection_timeout_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  // Handler whose on_call sleeps for longer than the receive timeout so the
+  // collection is guaranteed to time out before the reply arrives.
+  let assert Ok(ref) =
+    event_manager.add_handler(
+      mgr,
+      event_manager.new_handler(0, fn(_event, state) {
+        event_manager.Continue(state)
+      })
+        |> event_manager.with_call_handler(fn(_req, state) {
+          process.sleep(200)
+          #(state, state)
+        }),
+    )
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "slow", c)
+    }
+
+  let assert event_manager.CollectionTimeout(_) =
+    event_manager.receive_response_collection(
+      collection,
+      50,
+      event_manager.Delete,
+    )
+
+  event_manager.stop(mgr)
+}
+
+pub fn check_response_collection_returns_no_reply_for_unrelated_message_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(0))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "a", c)
+    }
+
+  let assert event_manager.NoReply(_) =
+    event_manager.check_response_collection(
+      dynamic.int(99),
+      collection,
+      event_manager.Delete,
+    )
+
+  // Drain the real reply so the process stays clean.
+  let assert event_manager.GotReply(_, _, _) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+
+  event_manager.stop(mgr)
+}
+
+pub fn check_response_collection_returns_no_requests_for_empty_collection_test() {
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+
+  event_manager.check_response_collection(
+    dynamic.int(0),
+    collection,
+    event_manager.Delete,
+  )
+  |> should.equal(event_manager.NoRequests)
+}
+
+pub fn send_request_to_collection_fans_out_to_two_handlers_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(h1) = event_manager.add_handler(mgr, make_count_handler(10))
+  let assert Ok(h2) = event_manager.add_handler(mgr, make_count_handler(20))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, h1, ReqGetCount, "h1", c)
+    }
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, h2, ReqGetCount, "h2", c)
+    }
+
+  let assert event_manager.GotReply(v1, l1, collection) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  let assert event_manager.GotReply(v2, l2, _) =
+    event_manager.receive_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+
+  let pairs =
+    [#(l1, v1), #(l2, v2)] |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+  pairs |> should.equal([#("h1", 10), #("h2", 20)])
+
+  event_manager.stop(mgr)
+}
+
+pub fn wait_response_collection_returns_got_reply_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+  let assert Ok(ref) = event_manager.add_handler(mgr, make_count_handler(99))
+
+  let collection: event_manager.RequestIdCollection(String, Int) =
+    event_manager.request_ids_new()
+    |> fn(c) {
+      event_manager.send_request_to_collection(mgr, ref, ReqGetCount, "wait", c)
+    }
+
+  let assert event_manager.GotReply(value, label, _) =
+    event_manager.wait_response_collection(
+      collection,
+      1000,
+      event_manager.Delete,
+    )
+  value |> should.equal(99)
+  label |> should.equal("wait")
+
+  event_manager.stop(mgr)
+}
