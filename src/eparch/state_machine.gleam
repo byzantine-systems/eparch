@@ -126,6 +126,7 @@ pub type QueuedEvent(message, reply) {
   QueuedInfo(message: message)
   QueuedInternal(message: message)
   QueuedStateTimeout(content: message)
+  QueuedEventTimeout(content: message)
   QueuedGenericTimeout(name: String, content: message)
   QueuedOther(raw: Dynamic)
 }
@@ -133,10 +134,11 @@ pub type QueuedEvent(message, reply) {
 /// An armed (not-yet-fired) timeout on the state machine.
 ///
 /// `ActiveOtherTimeout` handles any shape the FFI cannot classify as a
-/// state or generic timeout.
+/// state, event, or generic timeout.
 ///
 pub type ActiveTimeout(message) {
   ActiveStateTimeout(content: message)
+  ActiveEventTimeout(content: message)
   ActiveGenericTimeout(name: String, content: message)
   ActiveOtherTimeout(raw: Dynamic)
 }
@@ -162,8 +164,11 @@ pub type Event(state, message, reply) {
   /// Contains the previous state
   Enter(old_state: state)
 
-  /// Timeout events (state timeout or generic timeout)
-  Timeout(timeout: TimeoutType)
+  /// Timeout events (state, event, or generic timeout).
+  ///
+  /// `content` is the payload supplied when the timer was armed (or via
+  /// `UpdateStateTimeout` / `UpdateEventTimeout` / `UpdateGenericTimeout`).
+  Timeout(timeout: TimeoutType, content: message)
 }
 
 /// The result of handling an event.
@@ -211,11 +216,18 @@ pub type Action(message, reply) {
   /// Mirrors gen_statem:event_type/0.
   NextEvent(event_type: NextEventType(reply), content: message)
 
-  /// Set a state timeout (canceled on state change)
-  StateTimeout(milliseconds: Int)
+  /// Set a state timeout (canceled on state change). `content` is delivered
+  /// as the `Timeout` event payload when the timer fires.
+  StateTimeout(time: TimeoutTime, content: message)
 
-  /// Set a generic named timeout
-  GenericTimeout(name: String, milliseconds: Int)
+  /// Set an event timeout, the unnamed `timeout()` action from gen_statem.
+  /// Automatically canceled by *any* other event arriving in this state, so
+  /// the timer effectively measures inactivity since the last event.
+  EventTimeout(time: TimeoutTime, content: message)
+
+  /// Set a named generic timeout. Persists across state changes and is
+  /// addressable by `name` for cancel/update.
+  GenericTimeout(name: String, time: TimeoutTime, content: message)
 
   /// Hibernate the process after this callback returns.
   Hibernate
@@ -224,6 +236,10 @@ pub type Action(message, reply) {
   /// Since OTP 22.1.
   CancelStateTimeout
 
+  /// Cancel the running event timeout before it fires.
+  /// Since OTP 22.1.
+  CancelEventTimeout
+
   /// Cancel a running named generic timeout before it fires.
   /// Since OTP 22.1.
   CancelGenericTimeout(name: String)
@@ -231,6 +247,10 @@ pub type Action(message, reply) {
   /// Update the payload delivered when the state timeout fires,
   /// without restarting the timer. Since OTP 22.1.
   UpdateStateTimeout(content: message)
+
+  /// Update the payload delivered when the event timeout fires,
+  /// without restarting the timer. Since OTP 22.1.
+  UpdateEventTimeout(content: message)
 
   /// Update the payload delivered when a named generic timeout fires,
   /// without restarting the timer. Since OTP 22.1.
@@ -250,10 +270,28 @@ pub type Action(message, reply) {
   PopCallbackModule
 }
 
-/// Types of timeouts
+/// Types of timeouts.
+///
+/// Matches the three gen_statem timer classes:
+/// - `StateTimeoutType`: set with `StateTimeout`, canceled on state change.
+/// - `EventTimeoutType`: set with `EventTimeout`, canceled by any other
+///   event arriving in the current state (gen_statem's unnamed `timeout`).
+/// - `GenericTimeoutType(name)`: set with `GenericTimeout`, persists across
+///   state changes and is addressable by `name`.
 pub type TimeoutType {
   StateTimeoutType
+  EventTimeoutType
   GenericTimeoutType(name: String)
+}
+
+/// When a timer should fire.
+///
+/// - `After(ms)`: relative delay from now, the common case.
+/// - `At(ms)`: absolute `erlang:monotonic_time(millisecond)` deadline,
+///   maps to gen_statem's `[{abs, true}]` timeout option.
+pub type TimeoutTime {
+  After(milliseconds: Int)
+  At(monotonic_milliseconds: Int)
 }
 
 /// Mirrors gen_statem's event_type/0 so a single NextEvent can inject any
@@ -411,7 +449,7 @@ pub fn new(
 ///     Cast(_) -> keep_state(data, [])
 ///     Info(_) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
-///     Timeout(_) -> keep_state(data, [])
+///     Timeout(_, _) -> keep_state(data, [])
 ///   }
 /// }
 ///
@@ -441,11 +479,11 @@ pub fn on_event(
 /// ```gleam
 /// fn handle_event(event, _state, data) {
 ///   case event {
-///     Enter(_old) -> keep_state(data, [StateTimeout(30_000)])
+///     Enter(_old) -> keep_state(data, [state_timeout(After(30_000), Tick)])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Cast(_) -> keep_state(data, [])
 ///     Info(_) -> keep_state(data, [])
-///     Timeout(_) -> keep_state(data, [])
+///     Timeout(_, _) -> keep_state(data, [])
 ///   }
 /// }
 ///
@@ -683,7 +721,7 @@ pub fn ref_from_pid(pid: Pid) -> ServerRef(message)
 /// ## Example
 ///
 /// ```gleam
-/// next_state(Active, new_data, [StateTimeout(5000)])
+/// next_state(Active, new_data, [state_timeout(After(5000), TimedOut)])
 /// ```
 ///
 pub fn next_state(
@@ -804,9 +842,24 @@ pub fn next_event(
 /// Create a StateTimeout action.
 ///
 /// Sets a timeout that is automatically canceled when the state changes.
+/// `content` is delivered as the `Timeout` event payload when it fires.
 ///
-pub fn state_timeout(milliseconds: Int) -> Action(message, reply) {
-  StateTimeout(milliseconds:)
+pub fn state_timeout(
+  time: TimeoutTime,
+  content: message,
+) -> Action(message, reply) {
+  StateTimeout(time:, content:)
+}
+
+/// Create an EventTimeout action: gen_statem's unnamed `timeout()`.
+///
+/// Canceled by any other event arriving in the current state.
+///
+pub fn event_timeout(
+  time: TimeoutTime,
+  content: message,
+) -> Action(message, reply) {
+  EventTimeout(time:, content:)
 }
 
 /// Create a GenericTimeout action.
@@ -815,15 +868,22 @@ pub fn state_timeout(milliseconds: Int) -> Action(message, reply) {
 ///
 pub fn generic_timeout(
   name: String,
-  milliseconds: Int,
+  time: TimeoutTime,
+  content: message,
 ) -> Action(message, reply) {
-  GenericTimeout(name:, milliseconds:)
+  GenericTimeout(name:, time:, content:)
 }
 
 /// Cancel the running state timeout before it fires.
 ///
 pub fn cancel_state_timeout() -> Action(message, reply) {
   CancelStateTimeout
+}
+
+/// Cancel the running event timeout before it fires.
+///
+pub fn cancel_event_timeout() -> Action(message, reply) {
+  CancelEventTimeout
 }
 
 /// Cancel a running named generic timeout before it fires.
@@ -836,6 +896,12 @@ pub fn cancel_generic_timeout(name: String) -> Action(message, reply) {
 ///
 pub fn update_state_timeout(content: message) -> Action(message, reply) {
   UpdateStateTimeout(content:)
+}
+
+/// Update the payload of the running event timeout without restarting the timer.
+///
+pub fn update_event_timeout(content: message) -> Action(message, reply) {
+  UpdateEventTimeout(content:)
 }
 
 /// Update the payload of a running named generic timeout without restarting the timer.
@@ -966,7 +1032,7 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 ///     Info(_) -> keep_state(data, []) // ignore ambient noise
 ///     Call(_, _) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
-///     Timeout(_) -> keep_state(data, [])
+///     Timeout(_, _) -> keep_state(data, [])
 ///   }
 /// }
 /// ```

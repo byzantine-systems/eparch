@@ -408,6 +408,8 @@ classify_queue_entry({internal, Content}, _) ->
     {queued_internal, Content};
 classify_queue_entry({state_timeout, Content}, _) ->
     {queued_state_timeout, Content};
+classify_queue_entry({timeout, Content}, _) ->
+    {queued_event_timeout, Content};
 classify_queue_entry({{timeout, Name}, Content}, _) when is_binary(Name) ->
     {queued_generic_timeout, Name, Content};
 classify_queue_entry(Other, _) ->
@@ -418,6 +420,7 @@ unclassify_queue_entry({queued_cast, Content}) -> {cast, Content};
 unclassify_queue_entry({queued_info, Msg}) -> {info, Msg};
 unclassify_queue_entry({queued_internal, Content}) -> {internal, Content};
 unclassify_queue_entry({queued_state_timeout, Content}) -> {state_timeout, Content};
+unclassify_queue_entry({queued_event_timeout, Content}) -> {timeout, Content};
 unclassify_queue_entry({queued_generic_timeout, Name, Content}) -> {{timeout, Name}, Content};
 unclassify_queue_entry({queued_other, Raw}) -> Raw.
 
@@ -426,12 +429,15 @@ classify_timeouts(Entries) ->
 
 classify_timeout({state_timeout, Content}) ->
     {active_state_timeout, Content};
+classify_timeout({timeout, Content}) ->
+    {active_event_timeout, Content};
 classify_timeout({{timeout, Name}, Content}) when is_binary(Name) ->
     {active_generic_timeout, Name, Content};
 classify_timeout(Other) ->
     {active_other_timeout, Other}.
 
 unclassify_timeout({active_state_timeout, Content}) -> {state_timeout, Content};
+unclassify_timeout({active_event_timeout, Content}) -> {timeout, Content};
 unclassify_timeout({active_generic_timeout, Name, Content}) -> {{timeout, Name}, Content};
 unclassify_timeout({active_other_timeout, Raw}) -> Raw.
 
@@ -476,12 +482,16 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
             {enter, EventContent};
         state_timeout ->
             %% State timeout fired.
-            %% Gleam: Timeout(StateTimeoutType)
-            {timeout, state_timeout_type};
+            %% Gleam: Timeout(StateTimeoutType, content)
+            {timeout, state_timeout_type, EventContent};
+        timeout ->
+            %% Unnamed event timeout fired.
+            %% Gleam: Timeout(EventTimeoutType, content)
+            {timeout, event_timeout_type, EventContent};
         {timeout, Name} ->
             %% Named generic timeout fired.
-            %% Gleam: Timeout(GenericTimeoutType(name))
-            {timeout, {generic_timeout_type, Name}};
+            %% Gleam: Timeout(GenericTimeoutType(name), content)
+            {timeout, {generic_timeout_type, Name}, EventContent};
         internal ->
             %% Internal events are fired by the NextEvent action.
             %% Map to Cast so the user pattern-matches them as Cast(msg).
@@ -570,16 +580,22 @@ convert_action_to_erlang(Action) ->
             {next_event, info, Content};
         {next_event, {call_event, From}, Content} ->
             {next_event, {call, From}, Content};
-        {state_timeout, Milliseconds} ->
-            {state_timeout, Milliseconds, timeout};
-        {generic_timeout, Name, Milliseconds} ->
-            {{timeout, Name}, Milliseconds, timeout};
+        {state_timeout, Time, Content} ->
+            timeout_action(state_timeout, Time, Content);
+        {event_timeout, Time, Content} ->
+            timeout_action(timeout, Time, Content);
+        {generic_timeout, Name, Time, Content} ->
+            timeout_action({timeout, Name}, Time, Content);
         cancel_state_timeout ->
             {state_timeout, cancel};
+        cancel_event_timeout ->
+            {timeout, cancel};
         {cancel_generic_timeout, Name} ->
             {{timeout, Name}, cancel};
         {update_state_timeout, Content} ->
             {state_timeout, update, Content};
+        {update_event_timeout, Content} ->
+            {timeout, update, Content};
         {update_generic_timeout, Name, Content} ->
             {{timeout, Name}, update, Content};
         {change_callback_module, Module} ->
@@ -589,6 +605,15 @@ convert_action_to_erlang(Action) ->
         pop_callback_module ->
             pop_callback_module
     end.
+
+%% Build a gen_statem timeout action tuple from the Gleam TimeoutTime
+%% discriminator. `After` produces the 3-tuple form (relative ms);
+%% `At` produces the 4-tuple form with `[{abs, true}]` so `Ms` is treated
+%% as an absolute erlang:monotonic_time(millisecond) deadline.
+timeout_action(Tag, {'after', Ms}, Content) ->
+    {Tag, Ms, Content};
+timeout_action(Tag, {at, Ms}, Content) ->
+    {Tag, Ms, Content, [{abs, true}]}.
 
 subject_to_pid({subject, Pid, _Tag}) ->
     Pid;

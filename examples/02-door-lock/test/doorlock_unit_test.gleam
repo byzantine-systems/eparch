@@ -85,19 +85,23 @@ pub fn entering_locked_resets_buffer_test() {
 /// Entering the Open state arms the auto-lock timer.
 pub fn entering_open_state_sets_timeout_test() {
   call(sm.Enter(doorlock.Locked), doorlock.Open)
-  |> should.equal(sm.KeepStateAndData([sm.StateTimeout(timeout_ms)]))
+  |> should.equal(
+    sm.KeepStateAndData([
+      sm.StateTimeout(sm.After(timeout_ms), doorlock.AutoLock),
+    ]),
+  )
 }
 
 // State Timeout
 /// When the state timeout fires while Open, the door re-locks.
 pub fn state_timeout_while_open_transitions_to_locked_test() {
-  call(sm.Timeout(sm.StateTimeoutType), doorlock.Open)
+  call(sm.Timeout(sm.StateTimeoutType, doorlock.AutoLock), doorlock.Open)
   |> should.equal(sm.NextState(doorlock.Locked, data, []))
 }
 
 /// A state timeout while already Locked is a no-op (catch-all branch).
 pub fn state_timeout_while_locked_is_noop_test() {
-  call(sm.Timeout(sm.StateTimeoutType), doorlock.Locked)
+  call(sm.Timeout(sm.StateTimeoutType, doorlock.AutoLock), doorlock.Locked)
   |> should.equal(sm.KeepStateAndData([]))
 }
 

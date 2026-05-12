@@ -18,6 +18,9 @@ pub type Message {
 
   /// Synchronous query for the current lock state.
   GetStatus
+
+  /// Payload delivered when the auto-lock timer fires.
+  AutoLock
 }
 
 /// Replies are unified into one type because `gen_statem` uses a single
@@ -41,7 +44,9 @@ pub fn handle_event(
 
     // On entering Open, arm the auto-lock timer.
     sm.Enter(_), Open ->
-      sm.keep_state_and_data([sm.state_timeout(auto_lock_ms)])
+      sm.keep_state_and_data([
+        sm.state_timeout(sm.After(auto_lock_ms), AutoLock),
+      ])
 
     // Button press while Locked: match against the next expected digit.
     sm.Cast(Button(digit)), Locked -> match_digit(digit, data)
@@ -50,7 +55,8 @@ pub fn handle_event(
     sm.Cast(Button(_)), Open -> sm.keep_state_and_data([])
 
     // Auto-lock fires -> re-lock.
-    sm.Timeout(sm.StateTimeoutType), Open -> sm.next_state(Locked, data, [])
+    sm.Timeout(sm.StateTimeoutType, AutoLock), Open ->
+      sm.next_state(Locked, data, [])
 
     // GetStatus in any state -> reply with current state.
     sm.Call(from, GetStatus), _ ->
