@@ -43,7 +43,7 @@ import eparch/start_options.{
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode.{type DecodeError, type Decoder}
 import gleam/erlang/atom.{type Atom}
-import gleam/erlang/process.{type Monitor, type Name, type Pid}
+import gleam/erlang/process.{type ExitReason, type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
 
 /// The result of a handler processing an event.
@@ -734,14 +734,24 @@ fn do_sync_notify(manager: Manager(event), event: event) -> Nil
 ///
 pub type RequestId(reply)
 
+/// Termination reason classified by the FFI.
+///
+/// `Exit` wraps a recognised `process.ExitReason`. `RawReason` is a fallback
+/// for shapes the FFI cannot classify (e.g. `{shutdown, _}`, `{noproc, _}`,
+/// arbitrary user terms) so callers can still inspect the original term.
+///
+pub type StopReason {
+  Exit(reason: ExitReason)
+  RawReason(term: Dynamic)
+}
+
 /// Errors that `receive_response` and `wait_response` can return.
 ///
 pub type ReceiveError {
   /// No reply arrived within the timeout.
   ReceiveTimeout
-  /// The manager (or handler) exited before replying. The `reason` field
-  /// carries a human-readable description of the exit reason.
-  RequestCrashed(reason: String)
+  /// The manager (or handler) exited before replying.
+  RequestCrashed(reason: StopReason)
 }
 
 /// The result of a non-blocking `check_response` call.
@@ -752,7 +762,54 @@ pub type CheckResponse(reply) {
   /// The message was not a reply for this `RequestId`.
   CheckNoReply
   /// The manager (or handler) exited before replying.
-  CheckCrashed(reason: String)
+  CheckCrashed(reason: StopReason)
+}
+
+/// A collection of in-flight request IDs, each associated with a `label`.
+///
+/// Used with `send_request_to_collection`, `request_ids_add`, and
+/// `receive_response_collection` to manage multiple concurrent requests.
+/// Requires Erlang/OTP 25.0 or later.
+///
+pub type RequestIdCollection(label, reply)
+
+/// Whether `receive_response_collection` (and friends) removes the matched
+/// request from the returned collection after delivering the reply.
+///
+pub type ResponseHandling {
+  Delete
+  Keep
+}
+
+/// The result of waiting for, or checking for, a response from a
+/// `RequestIdCollection`.
+///
+pub type CollectionResponse(reply, label) {
+  /// A successful reply was received for one of the pending requests.
+  GotReply(
+    reply: reply,
+    label: label,
+    remaining: RequestIdCollection(label, reply),
+  )
+
+  /// One of the requests returned an error (e.g. the handler crashed).
+  RequestFailed(
+    reason: StopReason,
+    label: label,
+    remaining: RequestIdCollection(label, reply),
+  )
+
+  /// `receive_response_collection` / `wait_response_collection` only:
+  /// the timeout elapsed before any pending reply arrived. The collection
+  /// is unchanged.
+  CollectionTimeout(remaining: RequestIdCollection(label, reply))
+
+  /// `check_response_collection` only: the supplied message was not a
+  /// reply for any request in this collection. The collection is unchanged.
+  NoReply(remaining: RequestIdCollection(label, reply))
+
+  /// The collection had no pending requests.
+  NoRequests
 }
 
 /// Asynchronously call a specific handler and return a `RequestId`.
@@ -792,15 +849,19 @@ pub fn receive_response(
   timeout: Int,
 ) -> Result(reply, ReceiveError)
 
-/// Same as `receive_response`. Provided for API parity with OTP's
-/// `gen_server:wait_response/2`.
+/// Wait up to `timeout` milliseconds for the reply to a `RequestId`.
 ///
+/// Like `receive_response`, but maps to `gen_event:wait_response/2`. The two
+/// differ only in mailbox semantics: `wait_response` leaves non-matching
+/// messages in place on success, whereas `receive_response` selectively
+/// drains the matching message (and may leave the receive buffer in a state
+/// that affects later `receive` clauses).
+///
+@external(erlang, "event_manager_ffi", "wait_response")
 pub fn wait_response(
   request_id: RequestId(reply),
   timeout: Int,
-) -> Result(reply, ReceiveError) {
-  receive_response(request_id, timeout)
-}
+) -> Result(reply, ReceiveError)
 
 /// Non-blocking check: inspect `message` to see if it is a reply for
 /// `request_id`.
@@ -824,3 +885,155 @@ pub fn check_response(
   message: Dynamic,
   request_id: RequestId(reply),
 ) -> CheckResponse(reply)
+
+// ---------------------------------------------------------------------------
+// reqids collection API (OTP 25+)
+//
+// Mirrors the gen_event reqids API for fanning out multiple async requests
+// and draining their replies as they arrive, each tagged with a caller-
+// chosen `label`. Wraps `gen_event:reqids_*`, `gen_event:send_request/5`,
+// and the 3-arity collection variants of `wait_response`/`receive_response`/
+// `check_response`.
+// ---------------------------------------------------------------------------
+
+/// Create a new, empty request-id collection.
+///
+/// Used with `send_request_to_collection` to batch multiple async requests
+/// and then drain them through `receive_response_collection` (or similar).
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "reqids_new")
+pub fn request_ids_new() -> RequestIdCollection(label, reply)
+
+/// Add a `RequestId` to a collection under a `label`.
+///
+/// The label is returned alongside the reply in
+/// `receive_response_collection`, letting you identify which request the
+/// response belongs to.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "reqids_add")
+pub fn request_ids_add(
+  request_id request_id: RequestId(reply),
+  label label: label,
+  to collection: RequestIdCollection(label, reply),
+) -> RequestIdCollection(label, reply)
+
+/// Return the number of pending request IDs in a collection.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "reqids_size")
+pub fn request_ids_size(collection: RequestIdCollection(label, reply)) -> Int
+
+/// Convert a collection to a list of `#(RequestId, label)` pairs.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "reqids_to_list")
+pub fn request_ids_to_list(
+  collection: RequestIdCollection(label, reply),
+) -> List(#(RequestId(reply), label))
+
+/// Send an asynchronous call to a specific handler and immediately add the
+/// resulting `RequestId` to a collection under the given `label`.
+///
+/// Equivalent to calling `send_request` and `request_ids_add` in one step.
+/// Useful for issuing several requests in a loop before waiting for any of
+/// them.
+///
+/// ## Example
+///
+/// ```gleam
+/// let collection: event_manager.RequestIdCollection(String, Int) =
+///   event_manager.request_ids_new()
+/// let collection =
+///   event_manager.send_request_to_collection(mgr, h1, GetCount, "h1", collection)
+/// let collection =
+///   event_manager.send_request_to_collection(mgr, h2, GetCount, "h2", collection)
+/// // ... drain via receive_response_collection ...
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "send_request_to_collection")
+pub fn send_request_to_collection(
+  manager: Manager(event),
+  handler_ref: HandlerRef(request, reply),
+  request: request,
+  label: label,
+  to collection: RequestIdCollection(label, reply),
+) -> RequestIdCollection(label, reply)
+
+/// Wait up to `timeout` milliseconds for any pending reply in a collection.
+///
+/// Pass `Delete` to remove the matched request from the returned collection,
+/// or `Keep` to retain it. Call this in a loop to drain all responses one by
+/// one. Returns `CollectionTimeout(remaining)` when the timer expires before
+/// any reply arrives, and `NoRequests` when the collection is empty.
+///
+/// Selectively drains the matched message from the mailbox; non-matching
+/// mailbox messages may also be consumed.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert event_manager.GotReply(value, label, collection) =
+///   event_manager.receive_response_collection(
+///     collection,
+///     1000,
+///     event_manager.Delete,
+///   )
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "receive_response_collection")
+pub fn receive_response_collection(
+  collection: RequestIdCollection(label, reply),
+  timeout: Int,
+  handling: ResponseHandling,
+) -> CollectionResponse(reply, label)
+
+/// Like `receive_response_collection` but maps to `gen_event:wait_response/3`.
+///
+/// On success, leaves non-matching mailbox messages in place rather than
+/// draining them. Use when integrating with a custom `process.Selector`
+/// that expects untouched non-matching messages.
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "wait_response_collection")
+pub fn wait_response_collection(
+  collection: RequestIdCollection(label, reply),
+  timeout: Int,
+  handling: ResponseHandling,
+) -> CollectionResponse(reply, label)
+
+/// Non-blocking check: inspect `message` to see whether it is a reply for any
+/// request in `collection`.
+///
+/// Returns `GotReply(...)` / `RequestFailed(...)` if the message belongs to
+/// the collection, `NoReply(remaining)` if it is unrelated, or `NoRequests`
+/// if the collection is empty. Never blocks.
+///
+/// ## Example
+///
+/// ```gleam
+/// case event_manager.check_response_collection(raw_msg, coll, event_manager.Delete) {
+///   event_manager.GotReply(value, label, rest) -> // handle and continue
+///   event_manager.NoReply(_) -> // not ours, pass it on
+///   _ -> // ...
+/// }
+/// ```
+///
+/// Requires Erlang/OTP 25.0 or later.
+///
+@external(erlang, "event_manager_ffi", "check_response_collection")
+pub fn check_response_collection(
+  message: Dynamic,
+  collection: RequestIdCollection(label, reply),
+  handling: ResponseHandling,
+) -> CollectionResponse(reply, label)
