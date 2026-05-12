@@ -104,7 +104,7 @@ pub fn start_with_lock_timeout(
   |> sm.start
 }
 
-/// Press one button on the keypad. Fire-and-forget — the call returns
+/// Press one button on the keypad. Fire-and-forget: the call returns
 /// immediately and the lock processes the digit asynchronously.
 pub fn button(ref: sm.ServerRef(Message), digit: Int) -> Nil {
   sm.cast(ref, Button(digit))

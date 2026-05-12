@@ -5,9 +5,9 @@
 ## Related Issue
 
 <!-- Link to the issue this PR addresses, if any. -->
-<!-- Use "Closes #123" to auto-close the issue on merge. -->
+<!-- Use "- Closes #123" to auto-close the issue on merge. -->
 
-Closes #
+- Closes #
 
 ## Type of Change
 

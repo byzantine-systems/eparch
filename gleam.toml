@@ -1,5 +1,5 @@
 name = "eparch"
-version = "0.6.0"
+version = "1.0.0"
 target = "erlang"
 
 description = "Gleam-friendly types for some poweful Erlang/OTP behaviours (like gen_statem and gen_event)"
