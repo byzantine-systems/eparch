@@ -27,6 +27,8 @@ every installed instance distinguishable.
     do_add_handler/2,
     do_add_sup_handler/2,
     do_remove_handler/2,
+    do_swap_handler/3,
+    do_swap_sup_handler/3,
     do_which_handlers/1,
     do_notify/2,
     do_sync_notify/2,
@@ -61,7 +63,11 @@ every installed instance distinguishable.
     % none | {some, fn(state) -> nil}
     on_terminate,
     % none | {some, fn(state) -> binary()}
-    on_format_status
+    on_format_status,
+    % none | {some, fn(state) -> dynamic()}
+    on_swap_out,
+    % none | {some, fn(dynamic()) -> state}
+    on_swap_in
 }).
 
 %%%===================================================================
@@ -229,6 +235,35 @@ do_remove_handler(Pid, HandlerId) ->
     end.
 
 -doc """
+Atomically swap an installed handler for a new Gleam handler.
+
+The old handler's `terminate(swap, State)` is invoked; its return value is
+threaded into the new handler's `init({swap_init, NewHandler, NewRef}, Term)`
+so optional `on_swap_out`/`on_swap_in` callbacks can transfer state.
+""".
+do_swap_handler(Pid, OldHandlerId, NewGleamHandler) ->
+    swap_common(Pid, OldHandlerId, NewGleamHandler, fun gen_event:swap_handler/3).
+
+-doc """
+Same as `do_swap_handler/3` but uses `gen_event:swap_sup_handler/3`, linking
+the new handler to the caller.
+""".
+do_swap_sup_handler(Pid, OldHandlerId, NewGleamHandler) ->
+    swap_common(Pid, OldHandlerId, NewGleamHandler, fun gen_event:swap_sup_handler/3).
+
+swap_common(Pid, OldHandlerId, NewGleamHandler, SwapFun) ->
+    NewRef = make_ref(),
+    NewHandlerId = {event_manager_ffi, NewRef},
+    OldArgs = swap,
+    NewArgs = {swap_init, NewGleamHandler, NewRef},
+    case SwapFun(Pid, {OldHandlerId, OldArgs}, {NewHandlerId, NewArgs}) of
+        ok ->
+            {ok, NewHandlerId};
+        {error, Reason} ->
+            {error, {new_handler_init_failed, format_reason(Reason)}}
+    end.
+
+-doc """
 Return the list of handler identifiers (HandlerRef values) currently
 registered with the manager.
 
@@ -272,14 +307,37 @@ level as a 5-tuple:
 We unpack it here and store the fields alongside the unique Ref in a
 `#gleam_handler{}` record.
 """.
-init({{handler, InitState, OnEvent, OnCall, OnTerminate, OnFormatStatus}, Ref}) ->
+init({{handler, InitState, OnEvent, OnCall, OnTerminate, OnFormatStatus, OnSwapOut, OnSwapIn}, Ref}) ->
     State = #gleam_handler{
         ref = Ref,
         gleam_state = InitState,
         on_event = OnEvent,
         on_call = OnCall,
         on_terminate = OnTerminate,
-        on_format_status = OnFormatStatus
+        on_format_status = OnFormatStatus,
+        on_swap_out = OnSwapOut,
+        on_swap_in = OnSwapIn
+    },
+    {ok, State};
+init({{swap_init, GleamHandler, Ref}, TermResult}) ->
+    {handler, InitState, OnEvent, OnCall, OnTerminate, OnFormatStatus, OnSwapOut, OnSwapIn} =
+        GleamHandler,
+    FinalInitState =
+        case OnSwapIn of
+            none -> InitState;
+            %% `SwapTerm` is an empty Gleam type with identity runtime
+            %% representation, so TermResult is passed through unchanged.
+            {some, F} -> F(TermResult)
+        end,
+    State = #gleam_handler{
+        ref = Ref,
+        gleam_state = FinalInitState,
+        on_event = OnEvent,
+        on_call = OnCall,
+        on_terminate = OnTerminate,
+        on_format_status = OnFormatStatus,
+        on_swap_out = OnSwapOut,
+        on_swap_in = OnSwapIn
     },
     {ok, State}.
 
@@ -335,6 +393,13 @@ Handler teardown.
 Calls the optional `on_terminate` Gleam function with the final state if one
 was registered.
 """.
+terminate(swap, #gleam_handler{on_swap_out = OnSwapOut, gleam_state = GleamState}) ->
+    case OnSwapOut of
+        none -> nil;
+        %% On the Gleam side `SwapTerm` is an empty/opaque type, so the value
+        %% returned by F is already the raw term to pass forward as TermResult.
+        {some, F} -> F(GleamState)
+    end;
 terminate(_Reason, #gleam_handler{on_terminate = OnTerminate, gleam_state = GleamState}) ->
     case OnTerminate of
         none ->

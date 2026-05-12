@@ -8,6 +8,7 @@
 import eparch/event_manager
 import eparch/start_options
 import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
 import gleam/list
@@ -626,6 +627,200 @@ pub fn check_response_returns_check_got_reply_when_message_matches_test() {
     event_manager.CheckGotReply(value) -> value |> should.equal(7)
     _ -> should.fail()
   }
+
+  event_manager.stop(mgr)
+}
+
+// ---------------------------------------------------------------------------
+// SWAP HANDLER
+//
+// swap_handler atomically replaces an installed handler with a new one,
+// running the old handler's on_swap_out and the new handler's on_swap_in to
+// transfer state across the swap.
+// ---------------------------------------------------------------------------
+
+type SwapMsg {
+  SwapPing(reply_with: process.Subject(String))
+}
+
+type SwapCallMsg {
+  GetSwapCount
+}
+
+pub fn swap_handler_replaces_old_with_new_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  let make_handler = fn(tag: String) {
+    event_manager.new_handler(Nil, fn(event, state) {
+      case event {
+        SwapPing(reply_with: sub) -> {
+          process.send(sub, tag)
+          event_manager.Continue(state)
+        }
+      }
+    })
+  }
+
+  let assert Ok(old_ref) = event_manager.add_handler(mgr, make_handler("old"))
+  let assert Ok(new_ref) =
+    event_manager.swap_handler(mgr, old_ref, make_handler("new"))
+
+  event_manager.which_handlers(mgr) |> should.equal([new_ref])
+
+  let reply_sub = process.new_subject()
+  event_manager.sync_notify(mgr, SwapPing(reply_with: reply_sub))
+
+  let assert Ok(reply) = process.receive(reply_sub, 1000)
+  reply |> should.equal("new")
+
+  event_manager.stop(mgr)
+}
+
+pub fn swap_handler_transfers_state_via_swap_hooks_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  // Old handler holds a counter; on_swap_out emits it as a SwapTerm.
+  let old_handler =
+    event_manager.new_handler(0, fn(_event, count) {
+      event_manager.Continue(count + 1)
+    })
+    |> event_manager.on_swap_out(fn(count) {
+      event_manager.swap_term_from(count)
+    })
+
+  // New handler starts at -1 (so we can tell init_state from transferred
+  // state); on_swap_in decodes the prior counter and uses it as its state.
+  let new_handler =
+    event_manager.new_handler(-1, fn(_event, count) {
+      event_manager.Continue(count)
+    })
+    |> event_manager.on_swap_in(fn(term) {
+      case event_manager.swap_term_decode(term, decode.int) {
+        Ok(n) -> n
+        Error(_) -> -999
+      }
+    })
+    |> event_manager.with_call_handler(fn(_request, count) { #(count, count) })
+
+  let assert Ok(old_ref) = event_manager.add_handler(mgr, old_handler)
+  event_manager.sync_notify(mgr, SwapPing(reply_with: process.new_subject()))
+  event_manager.sync_notify(mgr, SwapPing(reply_with: process.new_subject()))
+  event_manager.sync_notify(mgr, SwapPing(reply_with: process.new_subject()))
+
+  let assert Ok(new_ref) = event_manager.swap_handler(mgr, old_ref, new_handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, new_ref, GetSwapCount)
+  let assert Ok(count) = event_manager.receive_response(req, 1000)
+  count |> should.equal(3)
+
+  event_manager.stop(mgr)
+}
+
+pub fn swap_handler_without_hooks_starts_from_init_state_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  let old_handler =
+    event_manager.new_handler(7, fn(_event, count) {
+      event_manager.Continue(count + 1)
+    })
+
+  let new_handler =
+    event_manager.new_handler(42, fn(_event, count) {
+      event_manager.Continue(count)
+    })
+    |> event_manager.with_call_handler(fn(_request, count) { #(count, count) })
+
+  let assert Ok(old_ref) = event_manager.add_handler(mgr, old_handler)
+  let assert Ok(new_ref) = event_manager.swap_handler(mgr, old_ref, new_handler)
+
+  let req: event_manager.RequestId(Int) =
+    event_manager.send_request(mgr, new_ref, GetSwapCount)
+  let assert Ok(count) = event_manager.receive_response(req, 1000)
+  count |> should.equal(42)
+
+  event_manager.stop(mgr)
+}
+
+pub fn swap_handler_skips_on_terminate_test() {
+  // When a handler is swapped out, its on_terminate is NOT invoked — the
+  // swap path runs on_swap_out only (or nothing if neither is set). This
+  // test fails (timeout) if that contract is broken.
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  let reply_sub = process.new_subject()
+
+  let old_handler =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+    |> event_manager.on_terminate(fn(_state) {
+      process.send(reply_sub, "terminated")
+    })
+
+  let new_handler =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+
+  let assert Ok(old_ref) = event_manager.add_handler(mgr, old_handler)
+  let assert Ok(_new_ref) =
+    event_manager.swap_handler(mgr, old_ref, new_handler)
+
+  process.receive(reply_sub, 100)
+  |> should.equal(Error(Nil))
+
+  event_manager.stop(mgr)
+}
+
+pub fn swap_handler_with_stale_ref_still_installs_new_test() {
+  // gen_event:swap_handler installs the new handler even when the old ref is
+  // unknown — it just hands {error, module_not_found} to the new handler's
+  // on_swap_in. This test pins that behaviour.
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  let h =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+  let assert Ok(ref) = event_manager.add_handler(mgr, h)
+  let assert Ok(Nil) = event_manager.remove_handler(mgr, ref)
+
+  let new_handler =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+
+  let assert Ok(new_ref) = event_manager.swap_handler(mgr, ref, new_handler)
+  event_manager.which_handlers(mgr) |> should.equal([new_ref])
+
+  event_manager.stop(mgr)
+}
+
+pub fn swap_supervised_handler_installs_new_ref_test() {
+  let assert Ok(mgr) =
+    event_manager.start_link(event_manager.new_start_options())
+
+  let old_handler =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+
+  let new_handler =
+    event_manager.new_handler(Nil, fn(_event, state) {
+      event_manager.Continue(state)
+    })
+
+  let assert Ok(old_ref) = event_manager.add_handler(mgr, old_handler)
+  let assert Ok(new_ref) =
+    event_manager.swap_supervised_handler(mgr, old_ref, new_handler)
+
+  event_manager.which_handlers(mgr) |> should.equal([new_ref])
 
   event_manager.stop(mgr)
 }
