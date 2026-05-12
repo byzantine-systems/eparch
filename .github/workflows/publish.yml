@@ -58,6 +58,6 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Publish to Hex
-        run: nix develop --impure --command gleam publish --yes
+        run: nix develop --impure --command gleam publish -y
         env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+          HEXPM_API_KEY: ${{ secrets.HEX_API_KEY }}
