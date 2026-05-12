@@ -172,6 +172,7 @@ type StTimeoutState {
 
 type StTimeoutMsg {
   StActivate
+  StTimedOutTick
   StGetState(reply_with: process.Subject(StTimeoutState))
 }
 
@@ -182,9 +183,11 @@ fn state_timeout_handler(
 ) -> state_machine.Step(StTimeoutState, Nil, StTimeoutMsg, Nil) {
   case event, state {
     state_machine.Info(StActivate), StIdle ->
-      state_machine.next_state(StActive, data, [state_machine.StateTimeout(10)])
+      state_machine.next_state(StActive, data, [
+        state_machine.StateTimeout(state_machine.After(10), StTimedOutTick),
+      ])
 
-    state_machine.Timeout(state_machine.StateTimeoutType), StActive ->
+    state_machine.Timeout(state_machine.StateTimeoutType, _content), StActive ->
       state_machine.next_state(StTimedOut, data, [])
 
     state_machine.Info(StGetState(reply_with: reply_sub)), _ -> {
@@ -232,7 +235,9 @@ fn cancel_handler(
 ) -> state_machine.Step(CancelState, Nil, CancelMsg, Nil) {
   case event, state {
     state_machine.Info(CActivate), CIdle ->
-      state_machine.next_state(CActive, data, [state_machine.StateTimeout(5000)])
+      state_machine.next_state(CActive, data, [
+        state_machine.StateTimeout(state_machine.After(5000), CActivate),
+      ])
 
     state_machine.Info(CLeave), CActive ->
       state_machine.next_state(CDone, data, [])
@@ -279,10 +284,13 @@ fn generic_timeout_handler(
 ) -> state_machine.Step(GenTimeoutState, Nil, GenTimeoutMsg, Nil) {
   case event, state {
     state_machine.Info(GtArm), GtWaiting ->
-      state_machine.keep_state(data, [state_machine.GenericTimeout("tick", 10)])
+      state_machine.keep_state(data, [
+        state_machine.GenericTimeout("tick", state_machine.After(10), GtArm),
+      ])
 
-    state_machine.Timeout(state_machine.GenericTimeoutType("tick")), GtWaiting ->
-      state_machine.next_state(GtTriggered, data, [])
+    state_machine.Timeout(state_machine.GenericTimeoutType("tick"), _),
+      GtWaiting
+    -> state_machine.next_state(GtTriggered, data, [])
 
     state_machine.Info(GtGetState(reply_with: reply_sub)), _ -> {
       process.send(reply_sub, state)
@@ -328,13 +336,13 @@ fn cancel_state_timeout_handler(
   case event, state {
     state_machine.Info(CstActivate), CstIdle ->
       state_machine.next_state(CstActive, data, [
-        state_machine.StateTimeout(5000),
+        state_machine.StateTimeout(state_machine.After(5000), CstActivate),
       ])
 
     state_machine.Info(CstCancel), CstActive ->
       state_machine.keep_state(data, [state_machine.cancel_state_timeout()])
 
-    state_machine.Timeout(state_machine.StateTimeoutType), CstActive ->
+    state_machine.Timeout(state_machine.StateTimeoutType, _), CstActive ->
       state_machine.next_state(CstTimedOut, data, [])
 
     state_machine.Info(CstGetState(reply_with: reply_sub)), _ -> {
@@ -381,7 +389,7 @@ fn cancel_generic_timeout_handler(
   case event, state {
     state_machine.Info(CgtArm), CgtWaiting ->
       state_machine.keep_state(data, [
-        state_machine.GenericTimeout("tick", 5000),
+        state_machine.GenericTimeout("tick", state_machine.After(5000), CgtArm),
       ])
 
     state_machine.Info(CgtCancel), CgtWaiting ->
@@ -389,8 +397,9 @@ fn cancel_generic_timeout_handler(
         state_machine.cancel_generic_timeout("tick"),
       ])
 
-    state_machine.Timeout(state_machine.GenericTimeoutType("tick")), CgtWaiting ->
-      state_machine.next_state(CgtTriggered, data, [])
+    state_machine.Timeout(state_machine.GenericTimeoutType("tick"), _),
+      CgtWaiting
+    -> state_machine.next_state(CgtTriggered, data, [])
 
     state_machine.Info(CgtGetState(reply_with: reply_sub)), _ -> {
       process.send(reply_sub, state)
@@ -435,14 +444,16 @@ fn update_state_timeout_handler(
 ) -> state_machine.Step(UstState, Nil, UstMsg, Nil) {
   case event, state {
     state_machine.Info(UstArm), UstWaiting ->
-      state_machine.keep_state(data, [state_machine.StateTimeout(200)])
+      state_machine.keep_state(data, [
+        state_machine.StateTimeout(state_machine.After(200), UstArm),
+      ])
 
     state_machine.Info(UstUpdate), UstWaiting ->
       state_machine.keep_state(data, [
         state_machine.update_state_timeout(UstUpdate),
       ])
 
-    state_machine.Timeout(state_machine.StateTimeoutType), UstWaiting ->
+    state_machine.Timeout(state_machine.StateTimeoutType, _), UstWaiting ->
       state_machine.next_state(UstFired, data, [])
 
     state_machine.Info(UstGetState(reply_with: reply_sub)), _ -> {
@@ -468,6 +479,263 @@ pub fn update_state_timeout_fires_without_restart_test() {
   process.send(subject_of(machine), UstGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   s |> should.equal(UstFired)
+}
+
+// EVENT TIMEOUT (unnamed gen_statem `timeout()`)
+//
+// Defining behaviour: any event arriving in the current state cancels it.
+type EvtState {
+  EvtWaiting
+  EvtFired
+  EvtPoked
+}
+
+type EvtMsg {
+  EvtArm
+  EvtPoke
+  EvtTick
+  EvtGetState(reply_with: process.Subject(EvtState))
+}
+
+fn event_timeout_handler(
+  event: state_machine.Event(EvtState, EvtMsg, Nil),
+  state: EvtState,
+  data: Nil,
+) -> state_machine.Step(EvtState, Nil, EvtMsg, Nil) {
+  case event, state {
+    state_machine.Info(EvtArm), EvtWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.EventTimeout(state_machine.After(10), EvtTick),
+      ])
+
+    state_machine.Timeout(state_machine.EventTimeoutType, EvtTick), EvtWaiting ->
+      state_machine.next_state(EvtFired, data, [])
+
+    state_machine.Info(EvtPoke), EvtWaiting ->
+      state_machine.next_state(EvtPoked, data, [])
+
+    state_machine.Info(EvtGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn event_timeout_fires_and_delivers_content_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: EvtWaiting, initial_data: Nil)
+    |> state_machine.on_event(event_timeout_handler)
+    |> state_machine.start_link
+
+  process.send(subject_of(machine), EvtArm)
+  process.sleep(30)
+
+  let reply_sub = process.new_subject()
+  process.send(subject_of(machine), EvtGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  // Only fires if the handler matched on the supplied EvtTick content.
+  s |> should.equal(EvtFired)
+}
+
+pub fn event_timeout_cancelled_by_subsequent_event_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: EvtWaiting, initial_data: Nil)
+    |> state_machine.on_event(event_timeout_handler)
+    |> state_machine.start_link
+
+  // Arm a 50ms event timeout, then send an unrelated event well before it
+  // would have fired. gen_statem auto-cancels event timeouts when any other
+  // event arrives, so the timer never fires; EvtPoke takes the machine to
+  // EvtPoked instead of EvtFired.
+  process.send(subject_of(machine), EvtArm)
+  process.send(subject_of(machine), EvtPoke)
+  process.sleep(80)
+
+  let reply_sub = process.new_subject()
+  process.send(subject_of(machine), EvtGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(EvtPoked)
+}
+
+// CANCEL EVENT TIMEOUT
+type CetState {
+  CetWaiting
+  CetTimedOut
+}
+
+type CetMsg {
+  CetArm
+  CetCancel
+  CetTick
+  CetGetState(reply_with: process.Subject(CetState))
+}
+
+fn cancel_event_timeout_handler(
+  event: state_machine.Event(CetState, CetMsg, Nil),
+  state: CetState,
+  data: Nil,
+) -> state_machine.Step(CetState, Nil, CetMsg, Nil) {
+  case event, state {
+    state_machine.Info(CetArm), CetWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.EventTimeout(state_machine.After(20), CetTick),
+      ])
+
+    state_machine.Info(CetCancel), CetWaiting ->
+      state_machine.keep_state(data, [state_machine.cancel_event_timeout()])
+
+    state_machine.Timeout(state_machine.EventTimeoutType, _), CetWaiting ->
+      state_machine.next_state(CetTimedOut, data, [])
+
+    state_machine.Info(CetGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn cancel_event_timeout_prevents_fire_test() {
+  // CetCancel cancels the just-armed event timeout. The implicit cancel-on-
+  // any-event also applies, but we cancel explicitly to exercise that path.
+  let assert Ok(machine) =
+    state_machine.new(initial_state: CetWaiting, initial_data: Nil)
+    |> state_machine.on_event(cancel_event_timeout_handler)
+    |> state_machine.start_link
+
+  process.send(subject_of(machine), CetArm)
+  process.send(subject_of(machine), CetCancel)
+  process.sleep(50)
+
+  let reply_sub = process.new_subject()
+  process.send(subject_of(machine), CetGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(CetWaiting)
+}
+
+// ABSOLUTE TIMEOUT (At(deadline))
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: atom.Atom) -> Int
+
+type AbsState {
+  AbsWaiting
+  AbsFired
+}
+
+type AbsMsg {
+  AbsArm(deadline_ms: Int)
+  AbsTick
+  AbsGetState(reply_with: process.Subject(AbsState))
+}
+
+fn abs_timeout_handler(
+  event: state_machine.Event(AbsState, AbsMsg, Nil),
+  state: AbsState,
+  data: Nil,
+) -> state_machine.Step(AbsState, Nil, AbsMsg, Nil) {
+  case event, state {
+    state_machine.Info(AbsArm(deadline_ms:)), AbsWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.StateTimeout(state_machine.At(deadline_ms), AbsTick),
+      ])
+
+    state_machine.Timeout(state_machine.StateTimeoutType, AbsTick), AbsWaiting ->
+      state_machine.next_state(AbsFired, data, [])
+
+    state_machine.Info(AbsGetState(reply_with: reply_sub)), _ -> {
+      process.send(reply_sub, state)
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn absolute_state_timeout_fires_near_deadline_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: AbsWaiting, initial_data: Nil)
+    |> state_machine.on_event(abs_timeout_handler)
+    |> state_machine.start_link
+
+  // Compute a deadline 20ms in the future on the monotonic clock.
+  let deadline = monotonic_time(atom.create("millisecond")) + 20
+  process.send(subject_of(machine), AbsArm(deadline_ms: deadline))
+  process.sleep(80)
+
+  let reply_sub = process.new_subject()
+  process.send(subject_of(machine), AbsGetState(reply_with: reply_sub))
+  let assert Ok(s) = process.receive(reply_sub, 1000)
+  s |> should.equal(AbsFired)
+}
+
+// CUSTOM CONTENT round-trip through a state timeout.
+type CntState {
+  CntWaiting
+  CntDone
+}
+
+type CntMsg {
+  CntArm
+  CntTick(retry: Int, label: String)
+  CntGetReceived(reply_with: process.Subject(CntMsg))
+}
+
+type CntData {
+  CntData(received: option.Option(CntMsg))
+}
+
+fn custom_content_handler(
+  event: state_machine.Event(CntState, CntMsg, Nil),
+  state: CntState,
+  data: CntData,
+) -> state_machine.Step(CntState, CntData, CntMsg, Nil) {
+  case event, state {
+    state_machine.Info(CntArm), CntWaiting ->
+      state_machine.keep_state(data, [
+        state_machine.StateTimeout(
+          state_machine.After(10),
+          CntTick(retry: 3, label: "boom"),
+        ),
+      ])
+
+    state_machine.Timeout(state_machine.StateTimeoutType, content), CntWaiting ->
+      state_machine.next_state(
+        CntDone,
+        CntData(received: option.Some(content)),
+        [],
+      )
+
+    state_machine.Info(CntGetReceived(reply_with: reply_sub)), _ -> {
+      case data.received {
+        option.Some(msg) -> process.send(reply_sub, msg)
+        option.None -> Nil
+      }
+      state_machine.keep_state(data, [])
+    }
+
+    _, _ -> state_machine.keep_state(data, [])
+  }
+}
+
+pub fn state_timeout_delivers_custom_content_test() {
+  let assert Ok(machine) =
+    state_machine.new(
+      initial_state: CntWaiting,
+      initial_data: CntData(received: option.None),
+    )
+    |> state_machine.on_event(custom_content_handler)
+    |> state_machine.start_link
+
+  process.send(subject_of(machine), CntArm)
+  process.sleep(40)
+
+  let reply_sub = process.new_subject()
+  process.send(subject_of(machine), CntGetReceived(reply_with: reply_sub))
+  let assert Ok(received) = process.receive(reply_sub, 1000)
+  received |> should.equal(CntTick(retry: 3, label: "boom"))
 }
 
 // CAST
