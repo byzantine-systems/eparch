@@ -41,6 +41,7 @@ import eparch/start_options.{
   type DebugFlag, type SpawnOption, type Timeout, Infinity,
 }
 import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode.{type DecodeError, type Decoder}
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Monitor, type Name, type Pid}
 import gleam/option.{type Option, None, Some}
@@ -121,6 +122,60 @@ pub type RemoveError(request, reply) {
   RemoveFailed(reason: String)
 }
 
+/// Errors that can occur when swapping handlers.
+///
+/// Note: when the supplied old `HandlerRef` is not currently registered, the
+/// swap still succeeds and the new handler is installed. The new handler's
+/// `on_swap_in` callback receives a `SwapTerm` wrapping the Erlang term
+/// `{error, module_not_found}` so it can detect this case if needed.
+pub type SwapError {
+  /// The new handler's init failed (e.g. its `on_swap_in` raised) or
+  /// `gen_event:swap_handler/3` returned an error term. `reason` is a
+  /// human-readable string produced from the raw Erlang error term.
+  NewHandlerInitFailed(reason: String)
+}
+
+/// An opaque carrier for state handed from a swapped-out handler to its
+/// replacement.
+///
+/// Produced inside `on_swap_out` via `swap_term_from` and consumed inside
+/// `on_swap_in` via `swap_term_decode`. Because the producer and consumer
+/// of a swap have independent state types, the carrier is intentionally
+/// untyped on the Gleam side — decode it with the `gleam/dynamic/decode`
+/// module.
+///
+pub type SwapTerm
+
+/// Wrap any value as a `SwapTerm` to hand to the next handler from
+/// `on_swap_out`.
+///
+@external(erlang, "gleam_stdlib", "identity")
+pub fn swap_term_from(value: anything) -> SwapTerm
+
+/// Decode the value carried by a `SwapTerm` using a `decode.Decoder`,
+/// typically inside `on_swap_in`.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.on_swap_in(fn(term) {
+///   case event_manager.swap_term_decode(term, decode.int) {
+///     Ok(n) -> n
+///     Error(_) -> 0
+///   }
+/// })
+/// ```
+///
+pub fn swap_term_decode(
+  term: SwapTerm,
+  decoder: Decoder(a),
+) -> Result(a, List(DecodeError)) {
+  decode.run(swap_term_as_dynamic(term), decoder)
+}
+
+@external(erlang, "gleam_stdlib", "identity")
+fn swap_term_as_dynamic(term: SwapTerm) -> Dynamic
+
 /// A builder for configuring a handler before registering it with a manager.
 ///
 /// Create one with `new_handler/2` and optionally extend it with
@@ -133,6 +188,8 @@ pub opaque type Handler(state, event, request, reply) {
     on_call: Option(fn(request, state) -> #(reply, state)),
     on_terminate: Option(fn(state) -> Nil),
     on_format_status: Option(fn(state) -> String),
+    on_swap_out: Option(fn(state) -> SwapTerm),
+    on_swap_in: Option(fn(SwapTerm) -> state),
   )
 }
 
@@ -187,6 +244,8 @@ pub fn new_handler(
     on_call: None,
     on_terminate: None,
     on_format_status: None,
+    on_swap_out: None,
+    on_swap_in: None,
   )
 }
 
@@ -249,6 +308,57 @@ pub fn with_call_handler(
   on_call: fn(request, state) -> #(reply, state),
 ) -> Handler(state, event, request, reply) {
   Handler(..handler, on_call: Some(on_call))
+}
+
+/// Provide a value to hand to the next handler when this one is swapped out
+/// via `swap_handler` or `swap_supervised_handler`.
+///
+/// The function receives the current handler state and returns a `SwapTerm`
+/// (built with `swap_term_from`) that the next handler's `on_swap_in` can
+/// decode. When unset, the next handler's `on_swap_in` (if any) is invoked
+/// with a placeholder value.
+///
+/// This callback is invoked **instead of** `on_terminate` when the removal
+/// happens through a swap. If you need both cleanup and state transfer in
+/// the swap path, run the cleanup inline within `on_swap_out`.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.new_handler(0, on_event)
+/// |> event_manager.on_swap_out(fn(count) { event_manager.swap_term_from(count) })
+/// ```
+///
+pub fn on_swap_out(
+  handler: Handler(state, event, request, reply),
+  extract: fn(state) -> SwapTerm,
+) -> Handler(state, event, request, reply) {
+  Handler(..handler, on_swap_out: Some(extract))
+}
+
+/// Derive this handler's initial state from the value produced by the
+/// previous handler's `on_swap_out` during a `swap_handler` operation.
+///
+/// When this callback is unset, the handler's `init_state` is used as-is and
+/// any value produced by the previous handler is discarded.
+///
+/// ## Example
+///
+/// ```gleam
+/// event_manager.new_handler(0, on_event)
+/// |> event_manager.on_swap_in(fn(term) {
+///   case event_manager.swap_term_decode(term, decode.int) {
+///     Ok(n) -> n
+///     Error(_) -> 0
+///   }
+/// })
+/// ```
+///
+pub fn on_swap_in(
+  handler: Handler(state, event, request, reply),
+  hydrate: fn(SwapTerm) -> state,
+) -> Handler(state, event, request, reply) {
+  Handler(..handler, on_swap_in: Some(hydrate))
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +621,66 @@ fn do_remove_handler(
   manager: Manager(event),
   handler_ref: HandlerRef(request, reply),
 ) -> Result(Nil, RemoveError(request, reply))
+
+/// Atomically swap an installed handler for a new one.
+///
+/// Maps to `gen_event:swap_handler/3`. The old handler's `on_swap_out`
+/// callback runs (if set), its result is threaded into the new handler's
+/// `on_swap_in` (if set) to produce the new handler's initial state, and the
+/// new handler is installed — all observed by the manager as a single
+/// transaction so no `notify` can slip between the remove and the add.
+///
+/// On success, returns the new handler's `HandlerRef`. The old `HandlerRef`
+/// becomes invalid.
+///
+/// The new handler is unsupervised. Use `swap_supervised_handler` to link
+/// the new handler to the calling process.
+///
+/// ## Example
+///
+/// ```gleam
+/// case event_manager.swap_handler(mgr, old_ref, new_handler) {
+///   Ok(new_ref) -> // use new_ref
+///   Error(_) -> Nil
+/// }
+/// ```
+///
+pub fn swap_handler(
+  manager: Manager(event),
+  old_handler_ref: HandlerRef(old_request, old_reply),
+  new_handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), SwapError) {
+  do_swap_handler(manager, old_handler_ref, new_handler)
+}
+
+@external(erlang, "event_manager_ffi", "do_swap_handler")
+fn do_swap_handler(
+  manager: Manager(event),
+  old_handler_ref: HandlerRef(old_request, old_reply),
+  new_handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), SwapError)
+
+/// Atomically swap an installed handler for a new supervised handler.
+///
+/// Like `swap_handler`, but maps to `gen_event:swap_sup_handler/3`: the new
+/// handler is linked to the calling process. If the new handler is later
+/// removed for any reason other than a normal `remove_handler` call, the
+/// caller receives a `{gen_event_EXIT, HandlerRef, Reason}` message.
+///
+pub fn swap_supervised_handler(
+  manager: Manager(event),
+  old_handler_ref: HandlerRef(old_request, old_reply),
+  new_handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), SwapError) {
+  do_swap_sup_handler(manager, old_handler_ref, new_handler)
+}
+
+@external(erlang, "event_manager_ffi", "do_swap_sup_handler")
+fn do_swap_sup_handler(
+  manager: Manager(event),
+  old_handler_ref: HandlerRef(old_request, old_reply),
+  new_handler: Handler(state, event, request, reply),
+) -> Result(HandlerRef(request, reply), SwapError)
 
 /// Return the list of `HandlerRef`s for all currently registered handlers.
 ///
