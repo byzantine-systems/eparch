@@ -68,7 +68,7 @@ pub fn wrong_digit_resets_progress_test() {
   doorlock.button(ref, 9)
   doorlock.get_status(ref) |> should.equal(doorlock.Locked)
 
-  // Continuing with 3, 4 alone is not enough — we need the full code.
+  // Continuing with 3, 4 alone is not enough; we need the full code.
   doorlock.button(ref, 3)
   doorlock.button(ref, 4)
   doorlock.get_status(ref) |> should.equal(doorlock.Locked)

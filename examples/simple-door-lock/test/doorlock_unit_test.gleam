@@ -3,7 +3,7 @@
 ////
 //// These tests call `handle_event` directly without spawning a process,
 //// so they run fast and are deterministic. They cover `Cast`, `Enter`,
-//// and `Timeout` events — the `Call(GetStatus)` path is covered by the
+//// and `Timeout` events; the `Call(GetStatus)` path is covered by the
 //// integration tests because `From` is opaque and can only be produced
 //// by the gen_statem runtime.
 ////
@@ -106,7 +106,7 @@ pub fn state_timeout_while_locked_is_noop_test() {
 }
 
 // Info / Unknown
-/// Info messages are silently ignored — the lock only listens to Cast and Call.
+/// Info messages are silently ignored; the lock only listens to Cast and Call.
 pub fn info_events_are_ignored_test() {
   call(sm.Info(doorlock.GetStatus), doorlock.Locked)
   |> should.equal(sm.KeepStateAndData([]))
