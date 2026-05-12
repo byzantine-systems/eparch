@@ -34,7 +34,16 @@ every installed instance distinguishable.
     do_sync_notify/2,
     send_request/3,
     receive_response/2,
-    check_response/2
+    wait_response/2,
+    check_response/2,
+    reqids_new/0,
+    reqids_add/3,
+    reqids_size/1,
+    reqids_to_list/1,
+    send_request_to_collection/5,
+    receive_response_collection/3,
+    wait_response_collection/3,
+    check_response_collection/3
 ]).
 
 %% gen_event handler callbacks
@@ -440,67 +449,175 @@ format_status(
     end.
 
 %%%===================================================================
-%%% Async call API — OTP 23+ style
+%%% Async call API: native `gen_event:send_request/3` (OTP 23+),
+%%% reqids collections (OTP 25+)
 %%%===================================================================
 
 -doc """
-Asynchronously call a specific handler and return a request reference.
+Asynchronously call a specific handler and return a `gen_event` request id.
 
-Spawns a lightweight helper process that calls `gen_event:call/4` (with a
-5-second hard timeout) and sends the result back to the caller tagged with a
-unique reference. Use `receive_response/2` or `check_response/2` to collect
-the reply.
+Wraps `gen_event:send_request/3`. Use `receive_response/2`, `wait_response/2`,
+or `check_response/2` to collect the reply.
 """.
 send_request(Manager, HandlerId, Request) ->
-    ReqRef = make_ref(),
-    Caller = self(),
-    spawn(fun() ->
-        Mon = erlang:monitor(process, Manager),
-        try
-            case gen_event:call(Manager, HandlerId, Request, 5000) of
-                {gleam_call_ok, Reply} ->
-                    erlang:demonitor(Mon, [flush]),
-                    Caller ! {gleam_event_call_reply, ReqRef, {ok, Reply}};
-                {gleam_call_error, Reason} ->
-                    erlang:demonitor(Mon, [flush]),
-                    Caller ! {gleam_event_call_reply, ReqRef, {error, Reason}}
-            end
-        catch
-            exit:ExitReason ->
-                erlang:demonitor(Mon, [flush]),
-                Caller ! {gleam_event_call_reply, ReqRef, {error, ExitReason}}
-        end
-    end),
-    ReqRef.
+    gen_event:send_request(Manager, HandlerId, Request).
 
 -doc """
-Block up to `Timeout` milliseconds for the reply to `ReqRef`.
+Block up to `Timeout` milliseconds for the reply to `ReqId`.
 
 Returns `{ok, Reply}` on success, `{error, receive_timeout}` on timeout, or
-`{error, {request_crashed, Reason}}` if the manager exited before replying.
+`{error, {request_crashed, StopReason}}` if the handler/manager exited before
+replying. Drains the matching message from the mailbox.
 """.
-receive_response(ReqRef, Timeout) ->
-    receive
-        {gleam_event_call_reply, ReqRef, {ok, Reply}} ->
+receive_response(ReqId, Timeout) ->
+    case gen_event:receive_response(ReqId, Timeout) of
+        {reply, {gleam_call_ok, Reply}} ->
             {ok, Reply};
-        {gleam_event_call_reply, ReqRef, {error, Reason}} ->
-            {error, {request_crashed, format_reason(Reason)}}
-    after Timeout ->
-        {error, receive_timeout}
+        {reply, {gleam_call_error, Reason}} ->
+            {error, {request_crashed, classify_reason(Reason)}};
+        timeout ->
+            {error, receive_timeout};
+        {error, {Reason, _Ref}} ->
+            {error, {request_crashed, classify_reason(Reason)}}
     end.
 
 -doc """
-Non-blocking check: test whether `Msg` is a reply for `ReqRef`.
+Same as `receive_response/2` but leaves non-matching messages in the mailbox
+on success (it does not selectively drain). Maps to `gen_event:wait_response/2`.
+""".
+wait_response(ReqId, Timeout) ->
+    case gen_event:wait_response(ReqId, Timeout) of
+        {reply, {gleam_call_ok, Reply}} ->
+            {ok, Reply};
+        {reply, {gleam_call_error, Reason}} ->
+            {error, {request_crashed, classify_reason(Reason)}};
+        timeout ->
+            {error, receive_timeout};
+        {error, {Reason, _Ref}} ->
+            {error, {request_crashed, classify_reason(Reason)}}
+    end.
 
-Returns `{check_got_reply, Reply}`, `{check_crashed, Reason}`, or
+-doc """
+Non-blocking check: test whether `Msg` is a reply for `ReqId`.
+
+Returns `{check_got_reply, Reply}`, `{check_crashed, StopReason}`, or
 `check_no_reply` if the message belongs to a different request.
 """.
-check_response(Msg, ReqRef) ->
-    case Msg of
-        {gleam_event_call_reply, ReqRef, {ok, Reply}} ->
+check_response(Msg, ReqId) ->
+    case gen_event:check_response(Msg, ReqId) of
+        {reply, {gleam_call_ok, Reply}} ->
             {check_got_reply, Reply};
-        {gleam_event_call_reply, ReqRef, {error, Reason}} ->
-            {check_crashed, format_reason(Reason)};
-        _ ->
-            check_no_reply
+        {reply, {gleam_call_error, Reason}} ->
+            {check_crashed, classify_reason(Reason)};
+        no_reply ->
+            check_no_reply;
+        {error, {Reason, _Ref}} ->
+            {check_crashed, classify_reason(Reason)}
     end.
+
+%%%===================================================================
+%%% reqids collection API: OTP 25.0+
+%%%===================================================================
+
+-doc "Creates a new empty request-id collection.".
+reqids_new() ->
+    gen_event:reqids_new().
+
+-doc "Adds a request id to a collection under the given label.".
+reqids_add(ReqId, Label, Collection) ->
+    gen_event:reqids_add(ReqId, Label, Collection).
+
+-doc "Returns the number of request ids in the collection.".
+reqids_size(Collection) ->
+    gen_event:reqids_size(Collection).
+
+-doc "Converts the collection to a list of {ReqId, Label} pairs.".
+reqids_to_list(Collection) ->
+    gen_event:reqids_to_list(Collection).
+
+-doc """
+Like `send_request/3` but also adds the resulting request id (under `Label`)
+to `Collection`, returning the updated collection.
+""".
+send_request_to_collection(Manager, HandlerId, Request, Label, Collection) ->
+    gen_event:send_request(Manager, HandlerId, Request, Label, Collection).
+
+-doc """
+Drain (or peek, when `Handling = keep`) the next reply from a collection.
+
+Maps `gen_event:receive_response/3` to a Gleam `CollectionResponse`:
+  `{got_reply, Reply, Label, NewColl}`
+  `{request_failed, StopReason, Label, NewColl}`
+  `{collection_timeout, Collection}`
+  `no_requests`
+""".
+receive_response_collection(Collection, Timeout, Handling) ->
+    Delete = (Handling =:= delete),
+    case gen_event:receive_response(Collection, Timeout, Delete) of
+        {{reply, {gleam_call_ok, Reply}}, Label, NewColl} ->
+            {got_reply, Reply, Label, NewColl};
+        {{reply, {gleam_call_error, Reason}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        {{error, {Reason, _Ref}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        no_request ->
+            no_requests;
+        timeout ->
+            {collection_timeout, Collection}
+    end.
+
+-doc """
+Like `receive_response_collection/3` but uses `gen_event:wait_response/3`,
+which does not drain non-matching mailbox messages on success.
+""".
+wait_response_collection(Collection, Timeout, Handling) ->
+    Delete = (Handling =:= delete),
+    case gen_event:wait_response(Collection, Timeout, Delete) of
+        {{reply, {gleam_call_ok, Reply}}, Label, NewColl} ->
+            {got_reply, Reply, Label, NewColl};
+        {{reply, {gleam_call_error, Reason}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        {{error, {Reason, _Ref}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        no_request ->
+            no_requests;
+        timeout ->
+            {collection_timeout, Collection}
+    end.
+
+-doc """
+Non-blocking check: test whether `Msg` is a reply for any request in
+`Collection`. Maps to `gen_event:check_response/3`. Never blocks.
+
+  `{got_reply, Reply, Label, NewColl}`: Msg is a successful reply
+  `{request_failed, StopReason, Label, NewColl}`: Msg is a crash report
+  `{no_reply, Collection}`: Msg is unrelated to any request in this collection
+  `no_requests`: the collection was empty
+""".
+check_response_collection(Msg, Collection, Handling) ->
+    Delete = (Handling =:= delete),
+    case gen_event:check_response(Msg, Collection, Delete) of
+        {{reply, {gleam_call_ok, Reply}}, Label, NewColl} ->
+            {got_reply, Reply, Label, NewColl};
+        {{reply, {gleam_call_error, Reason}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        {{error, {Reason, _Ref}}, Label, NewColl} ->
+            {request_failed, classify_reason(Reason), Label, NewColl};
+        no_reply ->
+            {no_reply, Collection};
+        no_request ->
+            no_requests
+    end.
+
+%%%===================================================================
+%%% Internal helpers
+%%%===================================================================
+
+-doc """
+Classify a raw Erlang exit reason as a Gleam `StopReason`. Mirrors
+`statem_ffi:classify_reason/1`.
+""".
+classify_reason(normal) -> {exit, {normal}};
+classify_reason(killed) -> {exit, {killed}};
+classify_reason({abnormal, T}) -> {exit, {abnormal, T}};
+classify_reason(Other) -> {raw_reason, Other}.

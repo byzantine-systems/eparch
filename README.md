@@ -2,6 +2,7 @@
 
 [![Package Version](https://img.shields.io/hexpm/v/eparch)](https://hex.pm/packages/eparch)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/eparch/)
+[![Erlang Compatible](https://img.shields.io/badge/target-erlang-b83998)](https://www.erlang.org/)
 ![License](https://img.shields.io/github/license/byzantine-systems/eparch)
 
 [![Built with Nix](https://builtwithnix.org/badge.svg)](https://builtwithnix.org)
