@@ -542,7 +542,10 @@ pub fn with_hibernate_after(
   Builder(..builder, hibernate_after: timeout)
 }
 
-/// Set the `sys` debug flags forwarded to the state machine on start.
+/// Set the `sys` debug flags forwarded to the state machine on start. Debug
+/// facilities may expose messages and state and should not be enabled in
+/// production. File debug logging is rejected by the Erlang FFI because it
+/// cannot safely constrain the destination path.
 ///
 pub fn with_debug(
   builder: Builder(state, data, message, reply),

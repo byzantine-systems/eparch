@@ -135,11 +135,13 @@ unpack_builder(Builder) ->
 invoke_start(link, none, InitArgs, Opts) ->
     gen_statem:start_link(?MODULE, InitArgs, Opts);
 invoke_start(link, {some, ServerName}, InitArgs, Opts) ->
-    gen_statem:start_link(ServerName, ?MODULE, InitArgs, Opts);
+    gen_statem:start_link(
+        eparch_options_ffi:validate_server_name(ServerName), ?MODULE, InitArgs, Opts
+    );
 invoke_start(no_link, none, InitArgs, Opts) ->
     gen_statem:start(?MODULE, InitArgs, Opts);
 invoke_start(no_link, {some, ServerName}, InitArgs, Opts) ->
-    gen_statem:start(ServerName, ?MODULE, InitArgs, Opts);
+    gen_statem:start(eparch_options_ffi:validate_server_name(ServerName), ?MODULE, InitArgs, Opts);
 invoke_start(atomic_monitor, none, InitArgs, Opts) ->
     ?OTP_FEATURE(
         "23.0",
@@ -149,12 +151,13 @@ invoke_start(atomic_monitor, none, InitArgs, Opts) ->
         gen_statem:start_monitor(?MODULE, InitArgs, Opts)
     );
 invoke_start(atomic_monitor, {some, ServerName}, InitArgs, Opts) ->
+    ValidServerName = eparch_options_ffi:validate_server_name(ServerName),
     ?OTP_FEATURE(
         "23.0",
         gen_statem,
         start_monitor,
         4,
-        gen_statem:start_monitor(ServerName, ?MODULE, InitArgs, Opts)
+        gen_statem:start_monitor(ValidServerName, ?MODULE, InitArgs, Opts)
     ).
 
 handle_start_result({ok, Pid}, AckTag) when is_pid(Pid) ->
@@ -331,7 +334,7 @@ format_status(
 ) ->
     case OnFormatStatus of
         none ->
-            Status;
+            redact_statem_status(Status);
         {some, Fun} ->
             Reason = classify_reason_opt(Status),
             Queue = classify_queue_entries(maps:get(queue, Status, []), SubjectTag),
@@ -368,12 +371,27 @@ format_status(
                         [unclassify_timeout(T) || T <- NewTimeouts];
                     (log, _) ->
                         NewLog;
-                    (_, V) ->
-                        V
+                    (_, _) ->
+                        redacted
                 end,
                 Status
             )
     end.
+
+redact_statem_status(Status) ->
+    maps:map(
+        fun
+            (state, _) -> redacted;
+            (data, _) -> redacted;
+            (reason, _) -> redacted;
+            (queue, _) -> [];
+            (postponed, _) -> [];
+            (timeouts, _) -> redacted;
+            (log, _) -> [];
+            (_, _) -> redacted
+        end,
+        Status
+    ).
 
 %%%===================================================================
 %%% format_status: Erlang <-> Gleam conversions
@@ -510,9 +528,7 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
             %% Map to Cast so the user pattern-matches them as Cast(msg).
             {cast, EventContent};
         _Other ->
-            %% Truly unknown event type, wrap as Info so the user can handle
-            %% or ignore it in their catch-all clause.
-            {info, {unexpected_event, EventType, EventContent}}
+            erlang:error({unexpected_event_type, EventType})
     end.
 
 %%%===================================================================
@@ -612,8 +628,10 @@ convert_action_to_erlang(Action) ->
         {update_generic_timeout, Name, Content} ->
             {{timeout, Name}, update, Content};
         {change_callback_module, Module} ->
+            ok = eparch_options_ffi:validate_callback_module(Module),
             {change_callback_module, Module};
         {push_callback_module, Module} ->
+            ok = eparch_options_ffi:validate_callback_module(Module),
             {push_callback_module, Module};
         pop_callback_module ->
             pop_callback_module
@@ -644,7 +662,7 @@ Resolves the ref to the appropriate `gen_statem`-compatible target and calls
 `EventType=cast` and is converted to `Cast(Msg)` for the Gleam handler.
 """.
 cast(ServerRef, Msg) ->
-    gen_statem:cast(ref_target(ServerRef), Msg),
+    ok = gen_statem:cast(ref_target(ServerRef), Msg),
     nil.
 
 -doc """
@@ -679,17 +697,18 @@ ref_from_pid(Pid) when is_pid(Pid) -> {server_ref_pid, Pid}.
 
 -doc "Stop a running state machine with reason `normal`.".
 stop_server(Subject) ->
-    gen_statem:stop(subject_to_pid(Subject)),
+    ok = gen_statem:stop(subject_to_pid(Subject)),
     nil.
 
 -doc "Stop a running state machine with a custom reason and timeout (ms).".
 stop_server_with(Subject, Reason, Timeout) ->
-    gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), Timeout),
+    ValidTimeout = eparch_options_ffi:timeout_to_erlang({milliseconds, Timeout}),
+    ok = gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), ValidTimeout),
     nil.
 
 -doc "Send a reply to a caller from outside the state machine callback.".
 send_reply(From, Reply) ->
-    gen_statem:reply(From, Reply),
+    ok = gen_statem:reply(From, Reply),
     nil.
 
 -doc """
@@ -698,8 +717,8 @@ Gleam's #(From, Reply) tuples are {From, Reply} in Erlang and must be
 converted to gen_statem reply actions {reply, From, Reply}.
 """.
 send_replies(Replies) ->
-    Actions = [{reply, F, R} || {F, R} <- Replies],
-    gen_statem:reply(Actions),
+    Actions = lists:map(fun({F, R}) -> {reply, F, R} end, Replies),
+    ok = gen_statem:reply(Actions),
     nil.
 
 -doc "Block indefinitely until a reply arrives. Since OTP 23.".
@@ -875,8 +894,7 @@ Converts a Gleam ExitReason to an Erlang exit reason term.
 """.
 convert_exit_reason(Reason) ->
     case Reason of
-        {normal} -> normal;
-        {killed} -> killed;
-        {abnormal, Term} -> {abnormal, Term};
-        _ -> Reason
+        normal -> normal;
+        killed -> killed;
+        {abnormal, Term} -> {abnormal, Term}
     end.

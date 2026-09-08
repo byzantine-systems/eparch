@@ -3,7 +3,12 @@
     {vsn, "1.0.0"},
     {registered, []},
     {applications, [kernel, stdlib]},
-    {env, []},
+    {env, [
+        %% Set either value to an explicit atom list to restrict modules that
+        %% callers may cause OTP to invoke. `all` preserves library interop.
+        {allowed_registry_modules, all},
+        {allowed_callback_modules, all}
+    ]},
     {modules, []},
     {licenses, ["LGPL-3.0-or-later"]},
     {links, [{"GitHub", "https://github.com/byzantine-systems/eparch"}]}
