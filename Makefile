@@ -1,24 +1,35 @@
-# I know you can easily shoot yourself in the foot
-# with this.
-MAKEFLAGS += -j$(shell nproc)
+GLEAM ?= gleam
+REBAR3 ?= rebar3
 
-# Gets all projects inside the examples/ directory
-EXAMPLES := $(wildcard examples/*/)
 FFI_DIR := src/eparch/ffi
+EXAMPLE_MANIFESTS := $(wildcard examples/*/gleam.toml)
+EXAMPLE_DIRS := $(patsubst %/gleam.toml,%,$(EXAMPLE_MANIFESTS))
+EXAMPLE_TARGETS := $(addprefix example-,$(notdir $(EXAMPLE_DIRS)))
 
-.PHONY: all ffi-check ffi-deps-nix $(EXAMPLES)
+.DEFAULT_GOAL := all
 
-# Default target
-all: $(EXAMPLES)
+.PHONY: all examples $(EXAMPLE_TARGETS) ffi-check ffi-deps-nix help
 
-# The recipe for each directory
-$(EXAMPLES):
-	@echo "Starting build for: $@"
-	@cd $@ && gleam deps update && gleam build && gleam test
-	@echo "Finished build for: $@"
+## all: Build and test every example project (default).
+all: examples
 
+## examples: Build and test every example project.
+examples: $(EXAMPLE_TARGETS)
+
+# Each target name maps to the matching directory under examples/. Keeping
+# projects as independent prerequisites lets the caller choose parallelism.
+$(EXAMPLE_TARGETS): example-%: examples/%/gleam.toml
+	@echo "Checking example: $*"
+	@cd "examples/$*" && $(GLEAM) update && $(GLEAM) build && $(GLEAM) test
+
+## ffi-check: Run the standalone Erlang library's EUnit and Dialyzer checks.
 ffi-check:
-	@cd $(FFI_DIR) && rebar3 do eunit, dialyzer
+	@cd "$(FFI_DIR)" && $(REBAR3) do eunit, dialyzer
 
+## ffi-deps-nix: Regenerate the standalone Erlang library's Nix dependency lock.
 ffi-deps-nix:
-	@cd $(FFI_DIR) && rebar3 as nix nix lock
+	@cd "$(FFI_DIR)" && $(REBAR3) as nix nix lock
+
+## help: Show the available targets.
+help:
+	@sed -n 's/^## /  /p' $(MAKEFILE_LIST)
