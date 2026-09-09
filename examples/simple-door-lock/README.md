@@ -1,18 +1,17 @@
 # Door Lock
 
-Door Lock example for the `eparch/state_machine`. Based on the [Door Lock](https://www.erlang.org/doc/system/statem.html#example) example from the OTP docs.
+Door Lock example for `eparch/state_machine`, based on the [OTP Door Lock example](https://www.erlang.org/doc/system/statem.html#example).
 
 ```mermaid
 stateDiagram
-    Locked --> Open   : correct code
-    Open   --> Locked : timeout
-    Locked --> Locked : wrong code (attempts + 1)
+    Locked --> Open   : last N buttons equal code
+    Open   --> Locked : 10-second timeout
+    Locked --> Locked : collect newest N buttons
 ```
 
-Demonstrates:
-- `with_state_enter()` to trigger an action on entering a state
-- `StateTimeout` to auto-lock after a configurable delay
-- Synchronous replies using embedded `Subject` in messages
+The machine keeps a rolling window containing at most the last N keypad digits, where N is the configured code length. Entering `Locked` prints `Lock` and clears that window. Entering `Open` prints `Unlock` and starts the configurable state timeout. Buttons pressed while open are ignored and do not restart it.
+
+The default auto-lock delay is 10 seconds. `start_with_lock_timeout` permits a different delay, primarily for integration tests. An empty code is accepted but can never open the lock.
 
 ## Usage
 
@@ -20,14 +19,12 @@ Demonstrates:
 import doorlock
 
 pub fn main() {
-  let assert Ok(machine) = doorlock.start("1234")
-  let subject = machine.data
+  let assert Ok(machine) = doorlock.start([1, 2, 3, 4])
 
-  doorlock.get_status(subject)   // => Locked
-  doorlock.enter_code(subject, "0000")  // => Error("Wrong code")
-  doorlock.enter_code(subject, "1234")  // => Ok(Nil)
-  doorlock.get_status(subject)   // => Open
-  // After 5 seconds the door auto-locks back to Locked
+  doorlock.get_status(machine.ref) // Locked
+  doorlock.enter_code(machine.ref, [0, 0, 0, 0]) // returns Nil asynchronously
+  doorlock.enter_code(machine.ref, [1, 2, 3, 4]) // returns Nil asynchronously
+  doorlock.get_status(machine.ref) // Open
+  // After 10 seconds the door auto-locks back to Locked.
 }
 ```
-

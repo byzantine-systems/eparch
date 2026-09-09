@@ -105,7 +105,9 @@ do_start_link({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, Spaw
             none ->
                 gen_event:start_link(ErlangOpts);
             {some, ServerName} ->
-                gen_event:start_link(ServerName, ErlangOpts)
+                gen_event:start_link(
+                    eparch_options_ffi:validate_server_name(ServerName), ErlangOpts
+                )
         end,
     convert_start_result(Result).
 
@@ -122,7 +124,7 @@ do_start_no_link({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, S
             none ->
                 gen_event:start(ErlangOpts);
             {some, ServerName} ->
-                gen_event:start(ServerName, ErlangOpts)
+                gen_event:start(eparch_options_ffi:validate_server_name(ServerName), ErlangOpts)
         end,
     convert_start_result(Result).
 
@@ -145,12 +147,13 @@ do_start_monitor({start_options, NameOpt, Timeout, HibernateAfter, DebugFlags, S
                     gen_event:start_monitor(ErlangOpts)
                 );
             {some, ServerName} ->
+                ValidServerName = eparch_options_ffi:validate_server_name(ServerName),
                 ?OTP_FEATURE(
                     "23.0",
                     gen_event,
                     start_monitor,
                     2,
-                    gen_event:start_monitor(ServerName, ErlangOpts)
+                    gen_event:start_monitor(ValidServerName, ErlangOpts)
                 )
         end,
     convert_monitor_result(Result).
@@ -177,7 +180,14 @@ build_start_opts(Timeout, HibernateAfter, DebugFlags, SpawnOpts) ->
 
 %% Render an Erlang error term as a human-readable Gleam string.
 format_reason(Reason) ->
-    unicode:characters_to_binary(io_lib:format("~p", [Reason])).
+    Printed = unicode:characters_to_binary(io_lib:format("~P", [Reason, 10])),
+    truncate_binary(Printed, 4096).
+
+truncate_binary(Binary, MaxBytes) when byte_size(Binary) =< MaxBytes ->
+    Binary;
+truncate_binary(Binary, MaxBytes) ->
+    <<Prefix:MaxBytes/binary, _/binary>> = Binary,
+    <<Prefix/binary, "...">>.
 
 -doc """
 Stop the event manager, terminating it with reason `normal`.
@@ -185,7 +195,7 @@ Stop the event manager, terminating it with reason `normal`.
 All registered handlers have their `terminate/2` callback invoked.
 """.
 do_stop(Pid) ->
-    gen_event:stop(Pid),
+    ok = gen_event:stop(Pid),
     nil.
 
 -doc """
@@ -301,7 +311,7 @@ Asynchronously broadcast an event to all registered handlers.
 Wraps `gen_event:notify/2`.  Returns immediately.
 """.
 do_notify(Pid, Event) ->
-    gen_event:notify(Pid, Event),
+    ok = gen_event:notify(Pid, Event),
     nil.
 
 -doc """
@@ -311,7 +321,7 @@ Wraps `gen_event:sync_notify/2`.  Blocks until every handler has processed
 the event.
 """.
 do_sync_notify(Pid, Event) ->
-    gen_event:sync_notify(Pid, Event),
+    ok = gen_event:sync_notify(Pid, Event),
     nil.
 
 %%%===================================================================
@@ -456,10 +466,22 @@ format_status(
 ) ->
     case OnFormatStatus of
         none ->
-            Status;
+            redact_handler_status(Status);
         {some, Fun} ->
             Status#{state => Fun(GleamState)}
     end.
+
+redact_handler_status(Status) ->
+    maps:map(
+        fun
+            (state, _) -> redacted;
+            (message, _) -> redacted;
+            (reason, _) -> redacted;
+            (log, _) -> [];
+            (_, _) -> redacted
+        end,
+        Status
+    ).
 
 %%%===================================================================
 %%% Async call API: native `gen_event:send_request/3` (OTP 23+),
@@ -607,7 +629,7 @@ Maps `gen_event:receive_response/3` to a Gleam `CollectionResponse`:
   `no_requests`
 """.
 receive_response_collection(Collection, Timeout, Handling) ->
-    Delete = (Handling =:= delete),
+    Delete = collection_delete(Handling),
     ?OTP_FEATURE(
         "25.0",
         gen_event,
@@ -632,7 +654,7 @@ Like `receive_response_collection/3` but uses `gen_event:wait_response/3`,
 which does not drain non-matching mailbox messages on success.
 """.
 wait_response_collection(Collection, Timeout, Handling) ->
-    Delete = (Handling =:= delete),
+    Delete = collection_delete(Handling),
     ?OTP_FEATURE(
         "25.0",
         gen_event,
@@ -662,7 +684,7 @@ Non-blocking check: test whether `Msg` is a reply for any request in
   `no_requests`: the collection was empty
 """.
 check_response_collection(Msg, Collection, Handling) ->
-    Delete = (Handling =:= delete),
+    Delete = collection_delete(Handling),
     ?OTP_FEATURE(
         "25.0",
         gen_event,
@@ -681,6 +703,9 @@ check_response_collection(Msg, Collection, Handling) ->
                 no_requests
         end
     ).
+
+collection_delete(delete) -> true;
+collection_delete(keep) -> false.
 
 %%%===================================================================
 %%% Internal helpers

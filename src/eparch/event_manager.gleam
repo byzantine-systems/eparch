@@ -364,13 +364,15 @@ pub fn on_swap_in(
 // ---------------------------------------------------------------------------
 // StartOptions builder
 // ---------------------------------------------------------------------------
-/// Build a fresh `StartOptions` with defaults: no registered name, `Infinity`
-/// for both `timeout` and `hibernate_after`, no debug flags, no spawn options.
+/// Build fresh start options with a 1-second initialisation timeout, no
+/// registered name, infinite idle time before hibernation, no debug flags, and
+/// no caller-supplied spawn options. The Erlang FFI adds a maximum heap limit
+/// unless one is supplied explicitly.
 ///
 pub fn new_start_options() -> StartOptions(event) {
   StartOptions(
     name: None,
-    timeout: Infinity,
+    timeout: start_options.Milliseconds(1000),
     hibernate_after: Infinity,
     debug: [],
     spawn_options: [],
@@ -411,7 +413,10 @@ pub fn with_hibernate_after(
   StartOptions(..options, hibernate_after: timeout)
 }
 
-/// Set the sys debug flags for the manager.
+/// Set the sys debug flags for the manager. Debug facilities may expose
+/// messages and state and should not be enabled in production. File debug
+/// logging is rejected by the Erlang FFI because it cannot safely constrain
+/// the destination path.
 ///
 pub fn with_debug(
   options: StartOptions(event),
