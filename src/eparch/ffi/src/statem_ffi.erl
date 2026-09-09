@@ -59,6 +59,20 @@ gen_statem behavior callbacks and Gleam's type-safe API.
         | {global, atom()}
         | {via, atom(), term()}}.
 
+-type timeout_option() :: infinity | {milliseconds, non_neg_integer()}.
+-type builder() ::
+    {builder, term(), term(), term(), term(), timeout_option(), timeout_option(),
+        [debug_trace | debug_log | debug_statistics], [term()], server_name_option(), term(),
+        term()}.
+-type start_error() ::
+    init_timeout
+    | {already_started, pid()}
+    | {init_exited, {abnormal, term()}}
+    | {init_failed, binary()}.
+-type start_result() :: {ok, {started, pid(), term()}} | {error, start_error()}.
+-type monitor_start_result() ::
+    {ok, {monitored_machine, pid(), term(), reference()}} | {error, start_error()}.
+
 -record(gleam_statem, {
     % Current Gleam state value
     gleam_state,
@@ -90,10 +104,7 @@ the latter is encoded at the Erlang level as the 12-tuple defined in
 `eparch/state_machine`. Returns the Gleam `Started(message)` 3-tuple
 `{started, Pid, ServerRef}` or a mapped error.
 """.
--spec do_start(LinkMode, Builder) -> Result when
-    LinkMode :: link | no_link,
-    Builder :: tuple(),
-    Result :: any().
+-spec do_start(link | no_link, builder()) -> start_result().
 do_start(LinkMode, Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
     StartResult = invoke_start(LinkMode, NameOpt, InitArgs, ExtraOpts),
@@ -104,9 +115,7 @@ Start a `gen_statem` process linked to the caller with an atomic monitor
 (OTP 23.0+). Returns the Gleam `MonitoredMachine(message)` 4-tuple
 `{monitored_machine, Pid, ServerRef, MonitorRef}` or a mapped error.
 """.
--spec do_start_monitor(Builder) -> Result when
-    Builder :: tuple(),
-    Result :: any().
+-spec do_start_monitor(builder()) -> monitor_start_result().
 do_start_monitor(Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
     StartResult = invoke_start(atomic_monitor, NameOpt, InitArgs, ExtraOpts),
@@ -114,7 +123,7 @@ do_start_monitor(Builder) ->
 
 %% --- builder unpacking ----------------------------------------------------
 
--spec unpack_builder(tuple()) -> {reference(), tuple(), [term()], server_name_option()}.
+-spec unpack_builder(builder()) -> {reference(), tuple(), [term()], server_name_option()}.
 unpack_builder(Builder) ->
     {builder, InitialState, InitialData, Handler, StateEnter, Timeout, HibernateAfter, Debug,
         SpawnOpts, NameOpt, OnCodeChange, OnFormatStatus} = Builder,
@@ -131,7 +140,7 @@ unpack_builder(Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt}.
 
 -spec invoke_start(link | no_link | atomic_monitor, server_name_option(), tuple(), [term()]) ->
-    {ok, pid()} | {ok, {pid(), reference()}} | {error, term()}.
+    {ok, pid()} | {ok, {pid(), reference()}} | {error, term()} | ignore.
 invoke_start(link, none, InitArgs, Opts) ->
     gen_statem:start_link(?MODULE, InitArgs, Opts);
 invoke_start(link, {some, ServerName}, InitArgs, Opts) ->
@@ -190,7 +199,9 @@ classify_start_error({error, timeout}) ->
 classify_start_error({error, {already_started, OtherPid}}) when is_pid(OtherPid) ->
     {error, {already_started, OtherPid}};
 classify_start_error({error, Reason}) ->
-    {error, {init_exited, {abnormal, Reason}}}.
+    {error, {init_exited, {abnormal, Reason}}};
+classify_start_error(ignore) ->
+    {error, {init_exited, {abnormal, ignore}}}.
 
 %%%===================================================================
 %%% gen_statem callbacks
