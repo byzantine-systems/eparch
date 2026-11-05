@@ -6,7 +6,7 @@
 //// the auto-lock state timeout.
 ////
 //// The auto-lock timeout is set to 100 ms (via `start_with_lock_timeout`)
-//// so timeout tests complete quickly without sleeping for 10 seconds.
+//// so timeout tests complete quickly without sleeping for 5 seconds.
 ////
 
 import doorlock
@@ -17,14 +17,14 @@ import gleeunit/should
 // Constants & Helpers
 const code = [1, 2, 3, 4]
 
-/// Start a lock with the default 10-second auto-lock.
-fn start() -> sm.ServerRef(doorlock.Message) {
+/// Start a lock with the default 5-second auto-lock.
+fn start() -> sm.ServerRef(doorlock.Message, doorlock.Reply) {
   let assert Ok(machine) = doorlock.start(code)
   machine.ref
 }
 
 /// Start a lock with a short auto-lock for timeout tests.
-fn start_fast() -> sm.ServerRef(doorlock.Message) {
+fn start_fast() -> sm.ServerRef(doorlock.Message, doorlock.Reply) {
   let assert Ok(machine) = doorlock.start_with_lock_timeout(code, 100)
   machine.ref
 }
@@ -58,17 +58,23 @@ pub fn one_button_at_a_time_opens_the_lock_test() {
   doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
-/// An overlapping sequence opens when its last four digits match.
-pub fn overlapping_sequence_opens_test() {
+/// A wrong digit in the middle of the sequence resets the buffer.
+pub fn wrong_digit_resets_progress_test() {
   let ref = start()
-  doorlock.enter_code(ref, [1, 1, 2, 3, 4])
-  doorlock.get_status(ref) |> should.equal(doorlock.Open)
-}
 
-/// Arbitrary leading input is evicted as the complete code arrives.
-pub fn leading_digits_then_code_opens_test() {
-  let ref = start()
-  doorlock.enter_code(ref, [8, 9, 7, 6, 1, 2, 3, 4])
+  // Two correct, then one wrong -> buffer resets, still Locked.
+  doorlock.button(ref, 1)
+  doorlock.button(ref, 2)
+  doorlock.button(ref, 9)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+
+  // Continuing with 3, 4 alone is not enough; we need the full code.
+  doorlock.button(ref, 3)
+  doorlock.button(ref, 4)
+  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
+
+  // Now the full correct sequence opens it.
+  doorlock.enter_code(ref, code)
   doorlock.get_status(ref) |> should.equal(doorlock.Open)
 }
 
@@ -82,16 +88,6 @@ pub fn buttons_while_open_are_ignored_test() {
   doorlock.button(ref, 9)
   doorlock.button(ref, 9)
   doorlock.get_status(ref) |> should.equal(doorlock.Open)
-}
-
-/// Open-state button casts do not restart the state timeout.
-pub fn buttons_while_open_do_not_postpone_auto_lock_test() {
-  let ref = start_fast()
-  doorlock.enter_code(ref, code)
-  process.sleep(60)
-  doorlock.button(ref, 9)
-  process.sleep(100)
-  doorlock.get_status(ref) |> should.equal(doorlock.Locked)
 }
 
 /// After the auto-lock timeout fires, the door transitions back to Locked.

@@ -116,10 +116,8 @@ pub fn start_monitor_delivers_down_test() {
     process.new_selector()
     |> process.select_specific_monitor(monitored.monitor, fn(down) { down })
 
-  // Trigger an abnormal stop via cast (the link from start_monitor would
-  // otherwise propagate to the test process, but gleeunit isolates each
-  // test in its own process so the worst case is a single test failure).
-  process.unlink(monitored.pid)
+  // start_monitor is unlinked: an abnormal exit is observable without
+  // unlinking or trapping exits in the caller.
   state_machine.cast(monitored.ref, Crash)
 
   let assert Ok(down) = process.selector_receive(selector, 1000)
@@ -277,7 +275,7 @@ pub fn ref_from_subject_round_trip_test() {
   let assert Ok(machine) = builder() |> state_machine.start_link
   let assert Ok(subject) = state_machine.ref_to_subject(machine.ref)
 
-  let wrapped = state_machine.ref_from_subject(subject)
+  let wrapped = state_machine.unsafe_ref_from_subject(subject)
   let reply = process.new_subject()
   state_machine.cast(wrapped, Ping(reply))
 
@@ -288,7 +286,7 @@ pub fn ref_from_subject_round_trip_test() {
 pub fn ref_from_pid_supports_cast_test() {
   let assert Ok(machine) = builder() |> state_machine.start_link
 
-  let from_pid = state_machine.ref_from_pid(machine.pid)
+  let from_pid = state_machine.unsafe_ref_from_pid(machine.pid)
   // ref_from_pid produces a ref with no associated Subject.
   state_machine.ref_to_subject(from_pid) |> should.equal(Error(Nil))
 

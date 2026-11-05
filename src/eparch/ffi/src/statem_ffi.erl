@@ -59,20 +59,6 @@ gen_statem behavior callbacks and Gleam's type-safe API.
         | {global, atom()}
         | {via, atom(), term()}}.
 
--type timeout_option() :: infinity | {milliseconds, non_neg_integer()}.
--type builder() ::
-    {builder, term(), term(), term(), term(), timeout_option(), timeout_option(),
-        [debug_trace | debug_log | debug_statistics], [term()], server_name_option(), term(),
-        term()}.
--type start_error() ::
-    init_timeout
-    | {already_started, pid()}
-    | {init_exited, {abnormal, term()}}
-    | {init_failed, binary()}.
--type start_result() :: {ok, {started, pid(), term()}} | {error, start_error()}.
--type monitor_start_result() ::
-    {ok, {monitored_machine, pid(), term(), reference()}} | {error, start_error()}.
-
 -record(gleam_statem, {
     % Current Gleam state value
     gleam_state,
@@ -101,21 +87,26 @@ Start a `gen_statem` process either linked (`link`) or unlinked (`no_link`).
 
 The Gleam side passes a `LinkMode` selector and the opaque `Builder` record;
 the latter is encoded at the Erlang level as the 12-tuple defined in
-`eparch/state_machine`. Returns the Gleam `Started(message)` 3-tuple
+`eparch/state_machine`. Returns the Gleam `Started(message, reply)` 3-tuple
 `{started, Pid, ServerRef}` or a mapped error.
 """.
--spec do_start(link | no_link, builder()) -> start_result().
+-spec do_start(LinkMode, Builder) -> Result when
+    LinkMode :: link | no_link,
+    Builder :: tuple(),
+    Result :: any().
 do_start(LinkMode, Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
     StartResult = invoke_start(LinkMode, NameOpt, InitArgs, ExtraOpts),
     handle_start_result(StartResult, AckTag).
 
 -doc """
-Start a `gen_statem` process linked to the caller with an atomic monitor
-(OTP 23.0+). Returns the Gleam `MonitoredMachine(message)` 4-tuple
+Start an unlinked `gen_statem` process with an atomic monitor
+(OTP 23.0+). Returns the Gleam `MonitoredMachine(message, reply)` 4-tuple
 `{monitored_machine, Pid, ServerRef, MonitorRef}` or a mapped error.
 """.
--spec do_start_monitor(builder()) -> monitor_start_result().
+-spec do_start_monitor(Builder) -> Result when
+    Builder :: tuple(),
+    Result :: any().
 do_start_monitor(Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt} = unpack_builder(Builder),
     StartResult = invoke_start(atomic_monitor, NameOpt, InitArgs, ExtraOpts),
@@ -123,7 +114,7 @@ do_start_monitor(Builder) ->
 
 %% --- builder unpacking ----------------------------------------------------
 
--spec unpack_builder(builder()) -> {reference(), tuple(), [term()], server_name_option()}.
+-spec unpack_builder(tuple()) -> {reference(), tuple(), [term()], server_name_option()}.
 unpack_builder(Builder) ->
     {builder, InitialState, InitialData, Handler, StateEnter, Timeout, HibernateAfter, Debug,
         SpawnOpts, NameOpt, OnCodeChange, OnFormatStatus} = Builder,
@@ -140,17 +131,15 @@ unpack_builder(Builder) ->
     {AckTag, InitArgs, ExtraOpts, NameOpt}.
 
 -spec invoke_start(link | no_link | atomic_monitor, server_name_option(), tuple(), [term()]) ->
-    {ok, pid()} | {ok, {pid(), reference()}} | {error, term()} | ignore.
+    {ok, pid()} | {ok, {pid(), reference()}} | {error, term()}.
 invoke_start(link, none, InitArgs, Opts) ->
     gen_statem:start_link(?MODULE, InitArgs, Opts);
 invoke_start(link, {some, ServerName}, InitArgs, Opts) ->
-    gen_statem:start_link(
-        eparch_options_ffi:validate_server_name(ServerName), ?MODULE, InitArgs, Opts
-    );
+    gen_statem:start_link(ServerName, ?MODULE, InitArgs, Opts);
 invoke_start(no_link, none, InitArgs, Opts) ->
     gen_statem:start(?MODULE, InitArgs, Opts);
 invoke_start(no_link, {some, ServerName}, InitArgs, Opts) ->
-    gen_statem:start(eparch_options_ffi:validate_server_name(ServerName), ?MODULE, InitArgs, Opts);
+    gen_statem:start(ServerName, ?MODULE, InitArgs, Opts);
 invoke_start(atomic_monitor, none, InitArgs, Opts) ->
     ?OTP_FEATURE(
         "23.0",
@@ -160,13 +149,12 @@ invoke_start(atomic_monitor, none, InitArgs, Opts) ->
         gen_statem:start_monitor(?MODULE, InitArgs, Opts)
     );
 invoke_start(atomic_monitor, {some, ServerName}, InitArgs, Opts) ->
-    ValidServerName = eparch_options_ffi:validate_server_name(ServerName),
     ?OTP_FEATURE(
         "23.0",
         gen_statem,
         start_monitor,
         4,
-        gen_statem:start_monitor(ValidServerName, ?MODULE, InitArgs, Opts)
+        gen_statem:start_monitor(ServerName, ?MODULE, InitArgs, Opts)
     ).
 
 handle_start_result({ok, Pid}, AckTag) when is_pid(Pid) ->
@@ -199,9 +187,7 @@ classify_start_error({error, timeout}) ->
 classify_start_error({error, {already_started, OtherPid}}) when is_pid(OtherPid) ->
     {error, {already_started, OtherPid}};
 classify_start_error({error, Reason}) ->
-    {error, {init_exited, {abnormal, Reason}}};
-classify_start_error(ignore) ->
-    {error, {init_exited, {abnormal, ignore}}}.
+    {error, {init_exited, {abnormal, Reason}}}.
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -254,8 +240,8 @@ build_server_ref({some, {via, Mod, Term}}) ->
 -doc """
 Always advertise `handle_event_function` + `state_enter`.
 
-`state_enter` cannot be made conditional here because `callback_mode/0`
-is called before `init/1`. The `handle_event/4` guard below filters out
+`callback_mode/0` has no access to the per-machine builder. The
+`handle_event/4` guard below filters out
 enter events when the user did not opt in.
 """.
 callback_mode() ->
@@ -345,7 +331,7 @@ format_status(
 ) ->
     case OnFormatStatus of
         none ->
-            redact_statem_status(Status);
+            Status;
         {some, Fun} ->
             Reason = classify_reason_opt(Status),
             Queue = classify_queue_entries(maps:get(queue, Status, []), SubjectTag),
@@ -375,34 +361,19 @@ format_status(
                             {some, R} -> unclassify_reason(R)
                         end;
                     (queue, _) ->
-                        [unclassify_queue_entry(E) || E <- NewQueue];
+                        [unclassify_queue_entry(E, SubjectTag) || E <- NewQueue];
                     (postponed, _) ->
-                        [unclassify_queue_entry(E) || E <- NewPostponed];
+                        [unclassify_queue_entry(E, SubjectTag) || E <- NewPostponed];
                     (timeouts, _) ->
                         [unclassify_timeout(T) || T <- NewTimeouts];
                     (log, _) ->
                         NewLog;
-                    (_, _) ->
-                        redacted
+                    (_, V) ->
+                        V
                 end,
                 Status
             )
     end.
-
-redact_statem_status(Status) ->
-    maps:map(
-        fun
-            (state, _) -> redacted;
-            (data, _) -> redacted;
-            (reason, _) -> redacted;
-            (queue, _) -> [];
-            (postponed, _) -> [];
-            (timeouts, _) -> redacted;
-            (log, _) -> [];
-            (_, _) -> redacted
-        end,
-        Status
-    ).
 
 %%%===================================================================
 %%% format_status: Erlang <-> Gleam conversions
@@ -418,16 +389,12 @@ classify_reason_opt(Status) ->
         error -> none
     end.
 
-%% Gleam process.ExitReason is {normal} | {killed} | {abnormal, Term}.
-%% Wrap recognised shapes as Exit(...); everything else as RawReason(term).
-classify_reason(normal) -> {exit, {normal}};
-classify_reason(killed) -> {exit, {killed}};
-classify_reason({abnormal, T}) -> {exit, {abnormal, T}};
+%% Fieldless Gleam constructors are atoms, not one-tuples.
+classify_reason(normal) -> {exit, normal};
+classify_reason(killed) -> {exit, killed};
 classify_reason(Other) -> {raw_reason, Other}.
 
-unclassify_reason({exit, {normal}}) -> normal;
-unclassify_reason({exit, {killed}}) -> killed;
-unclassify_reason({exit, {abnormal, T}}) -> {abnormal, T};
+unclassify_reason({exit, Reason}) -> convert_exit_reason(Reason);
 unclassify_reason({raw_reason, Term}) -> Term.
 
 classify_queue_entries(Entries, SubjectTag) ->
@@ -437,15 +404,10 @@ classify_queue_entry({{call, From}, Content}, _) ->
     {queued_call, From, Content};
 classify_queue_entry({cast, Content}, _) ->
     {queued_cast, Content};
-classify_queue_entry({info, Content}, SubjectTag) ->
-    %% Match handle_event/4's behaviour: unwrap messages sent via the Subject,
-    %% pass through raw Erlang terms unchanged.
-    Msg =
-        case Content of
-            {SubjectTag, M} -> M;
-            _ -> Content
-        end,
-    {queued_info, Msg};
+classify_queue_entry({info, {Tag, Content}}, Tag) ->
+    {queued_info, Content};
+classify_queue_entry({info, Term}, _) ->
+    {queued_raw_info, Term};
 classify_queue_entry({internal, Content}, _) ->
     {queued_internal, Content};
 classify_queue_entry({state_timeout, Content}, _) ->
@@ -457,14 +419,15 @@ classify_queue_entry({{timeout, Name}, Content}, _) when is_binary(Name) ->
 classify_queue_entry(Other, _) ->
     {queued_other, Other}.
 
-unclassify_queue_entry({queued_call, From, Content}) -> {{call, From}, Content};
-unclassify_queue_entry({queued_cast, Content}) -> {cast, Content};
-unclassify_queue_entry({queued_info, Msg}) -> {info, Msg};
-unclassify_queue_entry({queued_internal, Content}) -> {internal, Content};
-unclassify_queue_entry({queued_state_timeout, Content}) -> {state_timeout, Content};
-unclassify_queue_entry({queued_event_timeout, Content}) -> {timeout, Content};
-unclassify_queue_entry({queued_generic_timeout, Name, Content}) -> {{timeout, Name}, Content};
-unclassify_queue_entry({queued_other, Raw}) -> Raw.
+unclassify_queue_entry({queued_call, From, Content}, _) -> {{call, From}, Content};
+unclassify_queue_entry({queued_cast, Content}, _) -> {cast, Content};
+unclassify_queue_entry({queued_info, Msg}, Tag) -> {info, {Tag, Msg}};
+unclassify_queue_entry({queued_raw_info, Term}, _) -> {info, Term};
+unclassify_queue_entry({queued_internal, Content}, _) -> {internal, Content};
+unclassify_queue_entry({queued_state_timeout, Content}, _) -> {state_timeout, Content};
+unclassify_queue_entry({queued_event_timeout, Content}, _) -> {timeout, Content};
+unclassify_queue_entry({queued_generic_timeout, Name, Content}, _) -> {{timeout, Name}, Content};
+unclassify_queue_entry({queued_other, Raw}, _) -> Raw.
 
 classify_timeouts(Entries) ->
     [classify_timeout(E) || E <- Entries].
@@ -516,7 +479,7 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
                     {info, Msg};
                 Other ->
                     %% Raw Erlang message (monitor signals, raw sends, etc.).
-                    {info, Other}
+                    {raw_info, Other}
             end;
         enter ->
             %% State-entry callback: EventContent is the previous state.
@@ -536,10 +499,9 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
             {timeout, {generic_timeout_type, Name}, EventContent};
         internal ->
             %% Internal events are fired by the NextEvent action.
-            %% Map to Cast so the user pattern-matches them as Cast(msg).
-            {cast, EventContent};
+            {internal, EventContent};
         _Other ->
-            erlang:error({unexpected_event_type, EventType})
+            {raw_info, {unexpected_event, EventType, EventContent}}
     end.
 
 %%%===================================================================
@@ -550,10 +512,10 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
 -doc """
 Converts a Gleam Step back to the `gen_statem` result tuple format.
 """.
-convert_step_to_erlang(GleamStep, GleamStatem) ->
+convert_step_to_erlang(GleamStep, #gleam_statem{subject_tag = Tag} = GleamStatem) ->
     case GleamStep of
         {next_state, NewState, NewData, GleamActions} ->
-            Actions = convert_actions_to_erlang(GleamActions),
+            Actions = convert_actions_to_erlang(GleamActions, Tag),
             NewGleamStatem = GleamStatem#gleam_statem{
                 gleam_state = NewState,
                 gleam_data = NewData
@@ -563,7 +525,7 @@ convert_step_to_erlang(GleamStep, GleamStatem) ->
                 _ -> {next_state, NewState, NewGleamStatem, Actions}
             end;
         {keep_state, NewData, GleamActions} ->
-            Actions = convert_actions_to_erlang(GleamActions),
+            Actions = convert_actions_to_erlang(GleamActions, Tag),
             NewGleamStatem = GleamStatem#gleam_statem{
                 gleam_data = NewData
             },
@@ -572,13 +534,13 @@ convert_step_to_erlang(GleamStep, GleamStatem) ->
                 _ -> {keep_state, NewGleamStatem, Actions}
             end;
         {keep_state_and_data, GleamActions} ->
-            Actions = convert_actions_to_erlang(GleamActions),
+            Actions = convert_actions_to_erlang(GleamActions, Tag),
             case Actions of
                 [] -> keep_state_and_data;
                 _ -> {keep_state_and_data, Actions}
             end;
         {repeat_state, NewData, GleamActions} ->
-            Actions = convert_actions_to_erlang(GleamActions),
+            Actions = convert_actions_to_erlang(GleamActions, Tag),
             NewGleamStatem = GleamStatem#gleam_statem{
                 gleam_data = NewData
             },
@@ -587,22 +549,21 @@ convert_step_to_erlang(GleamStep, GleamStatem) ->
                 _ -> {repeat_state, NewGleamStatem, Actions}
             end;
         {repeat_state_and_data, GleamActions} ->
-            Actions = convert_actions_to_erlang(GleamActions),
+            Actions = convert_actions_to_erlang(GleamActions, Tag),
             case Actions of
                 [] -> repeat_state_and_data;
                 _ -> {repeat_state_and_data, Actions}
             end;
         {stop, Reason} ->
             {stop, convert_exit_reason(Reason)};
-        {stop_and_reply, Reason, GleamActions} ->
-            Replies = convert_actions_to_erlang(GleamActions),
-            {stop_and_reply, convert_exit_reason(Reason), Replies}
+        {stop_and_reply, Reason, Pairs} ->
+            {stop_and_reply, convert_exit_reason(Reason), reply_actions(Pairs)}
     end.
 
-convert_actions_to_erlang(GleamActions) ->
-    lists:map(fun convert_action_to_erlang/1, GleamActions).
+convert_actions_to_erlang(Actions, Tag) ->
+    [convert_action_to_erlang(Action, Tag) || Action <- Actions].
 
-convert_action_to_erlang(Action) ->
+convert_action_to_erlang(Action, Tag) ->
     case Action of
         {reply, From, Response} ->
             %% Reply to a gen_statem:call caller.
@@ -617,7 +578,7 @@ convert_action_to_erlang(Action) ->
         {next_event, cast_event, Content} ->
             {next_event, cast, Content};
         {next_event, info_event, Content} ->
-            {next_event, info, Content};
+            {next_event, info, {Tag, Content}};
         {next_event, {call_event, From}, Content} ->
             {next_event, {call, From}, Content};
         {state_timeout, Time, Content} ->
@@ -639,10 +600,8 @@ convert_action_to_erlang(Action) ->
         {update_generic_timeout, Name, Content} ->
             {{timeout, Name}, update, Content};
         {change_callback_module, Module} ->
-            ok = eparch_options_ffi:validate_callback_module(Module),
             {change_callback_module, Module};
         {push_callback_module, Module} ->
-            ok = eparch_options_ffi:validate_callback_module(Module),
             {push_callback_module, Module};
         pop_callback_module ->
             pop_callback_module
@@ -673,7 +632,7 @@ Resolves the ref to the appropriate `gen_statem`-compatible target and calls
 `EventType=cast` and is converted to `Cast(Msg)` for the Gleam handler.
 """.
 cast(ServerRef, Msg) ->
-    ok = gen_statem:cast(ref_target(ServerRef), Msg),
+    gen_statem:cast(ref_target(ServerRef), Msg),
     nil.
 
 -doc """
@@ -708,18 +667,17 @@ ref_from_pid(Pid) when is_pid(Pid) -> {server_ref_pid, Pid}.
 
 -doc "Stop a running state machine with reason `normal`.".
 stop_server(Subject) ->
-    ok = gen_statem:stop(subject_to_pid(Subject)),
+    gen_statem:stop(subject_to_pid(Subject)),
     nil.
 
 -doc "Stop a running state machine with a custom reason and timeout (ms).".
 stop_server_with(Subject, Reason, Timeout) ->
-    ValidTimeout = eparch_options_ffi:timeout_to_erlang({milliseconds, Timeout}),
-    ok = gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), ValidTimeout),
+    gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), Timeout),
     nil.
 
 -doc "Send a reply to a caller from outside the state machine callback.".
 send_reply(From, Reply) ->
-    ok = gen_statem:reply(From, Reply),
+    gen_statem:reply(From, Reply),
     nil.
 
 -doc """
@@ -728,9 +686,11 @@ Gleam's #(From, Reply) tuples are {From, Reply} in Erlang and must be
 converted to gen_statem reply actions {reply, From, Reply}.
 """.
 send_replies(Replies) ->
-    Actions = lists:map(fun({F, R}) -> {reply, F, R} end, Replies),
-    ok = gen_statem:reply(Actions),
+    gen_statem:reply(reply_actions(Replies)),
     nil.
+
+reply_actions(Pairs) ->
+    lists:map(fun({From, Reply}) -> {reply, From, Reply} end, Pairs).
 
 -doc "Block indefinitely until a reply arrives. Since OTP 23.".
 wait_response(ReqId) ->
@@ -856,7 +816,7 @@ or `{error, {request_crashed, StopReason}}` if the server terminated.
 """.
 receive_response(ReqId, Timeout) ->
     ?OTP_FEATURE(
-        "23.0",
+        "24.0",
         gen_statem,
         receive_response,
         2,
@@ -877,7 +837,7 @@ returned collection) or `keep`. Maps to Gleam's `CollectionResponse`
 constructors:
   `{got_reply, Reply, Label, NewColl}`
   `{request_failed, StopReason, Label, NewColl}`
-  `no_requests`
+  `no_requests` | `collection_timeout`
 """.
 receive_response_collection(Collection, Timeout, Handling) ->
     Delete =
@@ -895,6 +855,8 @@ receive_response_collection(Collection, Timeout, Handling) ->
                 {got_reply, Reply, Label, NewColl};
             {{error, {Reason, _ServerRef}}, Label, NewColl} ->
                 {request_failed, classify_reason(Reason), Label, NewColl};
+            timeout ->
+                collection_timeout;
             no_request ->
                 no_requests
         end
@@ -903,9 +865,6 @@ receive_response_collection(Collection, Timeout, Handling) ->
 -doc """
 Converts a Gleam ExitReason to an Erlang exit reason term.
 """.
-convert_exit_reason(Reason) ->
-    case Reason of
-        normal -> normal;
-        killed -> killed;
-        {abnormal, Term} -> {abnormal, Term}
-    end.
+convert_exit_reason(normal) -> normal;
+convert_exit_reason(killed) -> killed;
+convert_exit_reason({abnormal, Term}) -> Term.

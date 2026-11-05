@@ -48,7 +48,11 @@ pub type ServerName(message) {
 /// `Subject(message)` so that `process.send`, `state_machine.send`, and
 /// `state_machine.call` can be used as well.
 ///
-pub type ServerRef(message)
+/// The two parameters describe the whole machine protocol. A registered
+/// name must continue to denote that protocol if it is rebound. Erlang
+/// callers bypass Gleam's type checks and must honour the same contract.
+///
+pub type ServerRef(message, reply)
 
 /// A builder for configuring a state machine before starting it.
 ///
@@ -124,6 +128,7 @@ pub type QueuedEvent(message, reply) {
   QueuedCall(from: From(reply), message: message)
   QueuedCast(message: message)
   QueuedInfo(message: message)
+  QueuedRawInfo(term: Dynamic)
   QueuedInternal(message: message)
   QueuedStateTimeout(content: message)
   QueuedEventTimeout(content: message)
@@ -145,10 +150,8 @@ pub type ActiveTimeout(message) {
 
 /// Events that a state machine can receive.
 ///
-/// This unifies the three types of messages in OTP:
-/// - Calls (synchronous, requires reply)
-/// - Casts (asynchronous / fire-and-forget)
-/// - Info (other messages, from selectors/monitors)
+/// Calls, casts, Subject messages and internal events carry the machine's
+/// message type. Other mailbox traffic crosses the boundary as `Dynamic`.
 ///
 pub type Event(state, message, reply) {
   /// A synchronous call that expects a reply
@@ -157,8 +160,14 @@ pub type Event(state, message, reply) {
   /// An asynchronous cast (fire-and-forget)
   Cast(message: message)
 
-  /// An info message (from selectors, monitors, etc)
+  /// Delivered through this machine's Subject or inserted with `InfoEvent`.
   Info(message: message)
+
+  /// An untagged mailbox message, e.g. a monitor notification. Decode before use.
+  RawInfo(term: Dynamic)
+
+  /// An inserted `InternalEvent`, distinct from an external cast.
+  Internal(message: message)
 
   /// Internal event fired when entering a state (if state_enter enabled)
   /// Contains the previous state
@@ -195,9 +204,8 @@ pub type Step(state, data, message, reply) {
   /// Stop the state machine
   Stop(reason: ExitReason)
 
-  /// Stop the state machine and atomically send replies to pending callers.
-  /// Only `Reply(from, response)` actions are valid in the replies list.
-  StopAndReply(reason: ExitReason, replies: List(Action(message, reply)))
+  /// Send these replies before terminating. No other actions are legal here.
+  StopAndReply(reason: ExitReason, replies: List(#(From(reply), reply)))
 }
 
 /// Actions (side effects) to perform after handling an event.
@@ -211,9 +219,8 @@ pub type Action(message, reply) {
   /// Postpone this event until after a state change
   Postpone
 
-  /// Insert a new event at the front of the queue
-  /// Inject a synthetic event of any kind that gen_statem accepts.
-  /// Mirrors gen_statem:event_type/0.
+  /// Insert an event ahead of queued events. Multiple insertions are
+  /// delivered in list order. Not legal during a state-entry callback.
   NextEvent(event_type: NextEventType(reply), content: message)
 
   /// Set a state timeout (canceled on state change). `content` is delivered
@@ -294,8 +301,7 @@ pub type TimeoutTime {
   At(monotonic_milliseconds: Int)
 }
 
-/// Mirrors gen_statem's event_type/0 so a single NextEvent can inject any
-/// kind of synthetic event into the state machine.
+/// Event types supported by the `NextEvent` action.
 /// https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:event_type/0
 pub type NextEventType(reply) {
   /// Delivered as an internal event
@@ -317,21 +323,21 @@ pub type NextEventType(reply) {
 pub type From(reply)
 
 /// Data returned when a state machine starts successfully.
-pub type Started(message) {
+pub type Started(message, reply) {
   Started(
     /// The process identifier of the started state machine.
     pid: Pid,
     /// Opaque handle suitable for `cast`, `send_request`, etc. For unnamed
     /// and `Local`-named starts, also convertible to a `Subject(message)`
     /// via `ref_to_subject`.
-    ref: ServerRef(message),
+    ref: ServerRef(message, reply),
   )
 }
 
 /// Data returned by `start_monitor`: a started machine plus the OTP-23+
 /// atomic monitor for it.
-pub type MonitoredMachine(message) {
-  MonitoredMachine(pid: Pid, ref: ServerRef(message), monitor: Monitor)
+pub type MonitoredMachine(message, reply) {
+  MonitoredMachine(pid: Pid, ref: ServerRef(message, reply), monitor: Monitor)
 }
 
 /// Errors that can occur when starting a state machine.
@@ -344,13 +350,13 @@ pub type StartError {
 }
 
 /// Convenience type for start results.
-pub type StartResult(message) =
-  Result(Started(message), StartError)
+pub type StartResult(message, reply) =
+  Result(Started(message, reply), StartError)
 
 /// An opaque request ID returned by `send_request`.
 ///
-/// The phantom type `reply` tracks the expected response type at compile time.
-/// Requires Erlang/OTP 25.0 or later.
+/// The reply type comes from the machine's ref. Only the process that sent
+/// the request can collect the reply. Requires Erlang/OTP 23.0 or later.
 ///
 pub type RequestId(reply)
 
@@ -370,7 +376,7 @@ pub type ResponseHandling {
   Keep
 }
 
-/// Reasons `receive_response` and `receive_response_collection` can fail.
+/// Reasons waiting for a single request can fail.
 ///
 pub type ReceiveError {
   /// No reply was received within the timeout.
@@ -396,8 +402,12 @@ pub type CollectionResponse(reply, label) {
     remaining: RequestIdCollection(label, reply),
   )
 
-  /// The collection had no pending requests.
+  /// The collection was empty (not merely drained using `Keep`).
   NoRequests
+
+  /// No reply arrived in time. `receive_response_collection` abandons all
+  /// outstanding requests; discard this collection rather than retrying it.
+  CollectionTimeout
 }
 
 /// Create a new state machine builder with initial state and data.
@@ -447,7 +457,7 @@ pub fn new(
 ///     Cast(Increment) -> keep_state(Data(..data, count: data.count + 1), [])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, [])
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
 ///   }
@@ -482,7 +492,7 @@ pub fn on_event(
 ///     Enter(_old) -> keep_state(data, [state_timeout(After(30_000), Tick)])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, [])
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
 ///   }
 /// }
@@ -632,8 +642,8 @@ type LinkMode {
 
 /// Start a state machine process linked to the caller.
 ///
-/// Maps to `gen_statem:start_link/3,4`. Returns a `Started(message)` value
-/// containing the PID and a `ServerRef(message)`. For unnamed and `Local`-
+/// Maps to `gen_statem:start_link/3,4`. Returns a `Started(message, reply)` value
+/// containing the PID and a `ServerRef(message, reply)`. For unnamed and `Local`-
 /// named starts, the ref is convertible to a `Subject(message)` via
 /// `ref_to_subject`.
 ///
@@ -651,7 +661,7 @@ type LinkMode {
 ///
 pub fn start_link(
   builder: Builder(state, data, message, reply),
-) -> StartResult(message) {
+) -> StartResult(message, reply) {
   do_start(Link, builder)
 }
 
@@ -663,20 +673,16 @@ pub fn start_link(
 ///
 pub fn start(
   builder: Builder(state, data, message, reply),
-) -> StartResult(message) {
+) -> StartResult(message, reply) {
   do_start(NoLink, builder)
 }
 
-/// Start a state machine process linked to the caller and atomically return
-/// a monitor for it.
-///
-/// Maps to `gen_statem:start_monitor/3,4` (OTP 23.0+). Equivalent to
-/// `start_link` followed by `process.monitor`, but without the race window
-/// between the two calls.
+/// Start an unlinked state machine with an atomic monitor.
+/// Maps to `gen_statem:start_monitor/3,4` (OTP 23.0+).
 ///
 pub fn start_monitor(
   builder: Builder(state, data, message, reply),
-) -> Result(MonitoredMachine(message), StartError) {
+) -> Result(MonitoredMachine(message, reply), StartError) {
   do_start_monitor(builder)
 }
 
@@ -684,14 +690,14 @@ pub fn start_monitor(
 fn do_start(
   link_mode: LinkMode,
   builder: Builder(state, data, message, reply),
-) -> StartResult(message)
+) -> StartResult(message, reply)
 
 @external(erlang, "statem_ffi", "do_start_monitor")
 fn do_start_monitor(
   builder: Builder(state, data, message, reply),
-) -> Result(MonitoredMachine(message), StartError)
+) -> Result(MonitoredMachine(message, reply), StartError)
 
-/// Extract the `Subject(message)` underlying a `ServerRef(message)`.
+/// Extract the `Subject(message)` underlying a `ServerRef(message, reply)`.
 ///
 /// Succeeds for refs returned by unnamed starts and `Local`-named starts.
 /// Returns `Error(Nil)` for refs registered through `Global` or `Via`,
@@ -699,25 +705,23 @@ fn do_start_monitor(
 /// outside the local-atom name table.
 ///
 @external(erlang, "statem_ffi", "ref_to_subject")
-pub fn ref_to_subject(ref: ServerRef(message)) -> Result(Subject(message), Nil)
+pub fn ref_to_subject(
+  ref: ServerRef(message, reply),
+) -> Result(Subject(message), Nil)
 
-/// Wrap an existing `Subject(message)` as a `ServerRef(message)`.
-///
-/// Useful when a state machine's subject is already in hand (e.g. captured
-/// during start) and it needs to be passed to a function that expects a
-/// `ServerRef`.
+/// Interop escape hatch: a Subject cannot prove the target machine's reply
+/// type. Prefer retaining the ref returned by start.
 ///
 @external(erlang, "statem_ffi", "ref_from_subject")
-pub fn ref_from_subject(subject: Subject(message)) -> ServerRef(message)
+pub fn unsafe_ref_from_subject(
+  subject: Subject(message),
+) -> ServerRef(message, reply)
 
-/// Wrap a raw `Pid` as a `ServerRef(message)`.
-///
-/// The phantom `message` parameter is unchecked; callers are responsible
-/// for passing the correct type. Use only when the Pid is known to belong
-/// to an eparch state machine handling messages of the expected type.
+/// Interop escape hatch: neither the message nor the reply type is checked.
+/// Only use when the pid is known to implement the expected protocol.
 ///
 @external(erlang, "statem_ffi", "ref_from_pid")
-pub fn ref_from_pid(pid: Pid) -> ServerRef(message)
+pub fn unsafe_ref_from_pid(pid: Pid) -> ServerRef(message, reply)
 
 /// Create a NextState step indicating a state transition.
 ///
@@ -791,13 +795,11 @@ pub fn stop(reason: ExitReason) -> Step(state, data, message, reply) {
   Stop(reason:)
 }
 
-/// Stop the state machine and atomically send replies to pending callers.
-///
-/// Only `Reply(from, response)` actions are valid in the `replies` list.
+/// Send the given caller/response pairs before terminating.
 ///
 pub fn stop_and_reply(
   reason: ExitReason,
-  replies: List(Action(message, reply)),
+  replies: List(#(From(reply), reply)),
 ) -> Step(state, data, message, reply) {
   StopAndReply(reason: reason, replies: replies)
 }
@@ -1006,9 +1008,8 @@ pub fn reply_and_keep(
 
 /// Send a message to a state machine via `process.send` (arrives as `Info`).
 ///
-/// The message is delivered to the handler as `Info(message)`. Use this for
-/// messages sent from processes that are not aware of this library, e.g.
-/// monitors, timers, or plain Erlang processes.
+/// The Subject tags the payload so the handler receives `Info(message)`.
+/// Untagged Erlang messages instead arrive as `RawInfo(term)`.
 ///
 /// To deliver messages as `Cast(message)` instead, use `cast/2`.
 ///
@@ -1032,7 +1033,7 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 ///   case event {
 ///     Cast(Increment) -> keep_state(data + 1, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, []) // ignore ambient noise
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
@@ -1041,7 +1042,7 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 /// ```
 ///
 @external(erlang, "statem_ffi", "cast")
-pub fn cast(ref: ServerRef(message), message: message) -> Nil
+pub fn cast(ref: ServerRef(message, reply), message: message) -> Nil
 
 /// Send a synchronous call and wait for a reply.
 ///
@@ -1081,7 +1082,7 @@ pub fn request_ids_add(
   to collection: RequestIdCollection(label, reply),
 ) -> RequestIdCollection(label, reply)
 
-/// Return the number of pending request IDs in a collection.
+/// Return the number of associations, including responses retained with `Keep`.
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
@@ -1103,8 +1104,7 @@ pub fn request_ids_to_list(
 /// collect the reply. The server receives a `Call(from, message)` event
 /// and must reply with a `Reply(from, value)` action.
 ///
-/// The `reply` type cannot always be inferred, so annotate the binding when
-/// needed: `let request: RequestId(MyReply) = send_request(machine.ref, MyMsg)`
+/// The machine's `ServerRef(message, reply)` determines the reply type.
 ///
 /// ## Example
 ///
@@ -1115,11 +1115,11 @@ pub fn request_ids_to_list(
 /// let assert Ok(count) = state_machine.receive_response(request, 1000)
 /// ```
 ///
-/// Requires Erlang/OTP 25.0 or later.
+/// Requires Erlang/OTP 23.0 or later.
 ///
 @external(erlang, "statem_ffi", "send_request")
 pub fn send_request(
-  ref: ServerRef(message),
+  ref: ServerRef(message, reply),
   message: message,
 ) -> RequestId(reply)
 
@@ -1146,7 +1146,7 @@ pub fn send_request(
 ///
 @external(erlang, "statem_ffi", "send_request_to_collection")
 pub fn send_request_to_collection(
-  ref: ServerRef(message),
+  ref: ServerRef(message, reply),
   message: message,
   label: label,
   to collection: RequestIdCollection(label, reply),
@@ -1156,9 +1156,10 @@ pub fn send_request_to_collection(
 ///
 /// Returns `Ok(reply)` on success, `Error(ReceiveTimeout)` if no reply
 /// arrives in time, or `Error(RequestCrashed(reason))` if the server
-/// terminated before replying.
+/// terminated before replying. A timeout abandons the request. Use
+/// `wait_response_timeout` instead if you intend to wait again.
 ///
-/// Requires Erlang/OTP 25.0 or later.
+/// Requires Erlang/OTP 24.0 or later.
 ///
 @external(erlang, "statem_ffi", "receive_response")
 pub fn receive_response(
@@ -1169,8 +1170,10 @@ pub fn receive_response(
 /// Wait up to `timeout` milliseconds for any pending reply in a collection.
 ///
 /// Pass `Delete` to remove the matched request from the returned collection,
-/// or `Keep` to retain it. Call this in a loop to drain all responses one by
-/// one.
+/// or `Keep` to retain its association even after the reply is consumed.
+/// On `CollectionTimeout` discard the collection: OTP abandons all remaining
+/// requests. With alias-capable servers (OTP 24+) late replies are dropped;
+/// the server's work is not cancelled.
 ///
 /// ## Example
 ///

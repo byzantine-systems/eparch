@@ -58,22 +58,22 @@ pub fn handle_event(
 
 // Public API
 /// Start the pushbutton with press count at 0 and initial state Off.
-pub fn start() -> sm.StartResult(Message) {
+pub fn start() -> sm.StartResult(Message, Reply) {
   sm.new(initial_state: Off, initial_data: Data(count: 0))
   |> sm.on_event(handle_event)
   |> sm.start
 }
 
-/// Toggle the button and return the count *before* the toggle.
-pub fn push(ref: sm.ServerRef(Message)) -> State {
-  let request: sm.RequestId(Reply) = sm.send_request(ref, Push)
+/// Toggle the button and return its new state.
+pub fn push(ref: sm.ServerRef(Message, Reply)) -> State {
+  let request = sm.send_request(ref, Push)
   let assert Ok(PushReply(new_state)) = sm.receive_response(request, 5000)
   new_state
 }
 
 /// Query the press count without changing state.
-pub fn get_count(ref: sm.ServerRef(Message)) -> Int {
-  let request: sm.RequestId(Reply) = sm.send_request(ref, GetCount)
+pub fn get_count(ref: sm.ServerRef(Message, Reply)) -> Int {
+  let request = sm.send_request(ref, GetCount)
   let assert Ok(CountReply(count)) = sm.receive_response(request, 5000)
   count
 }

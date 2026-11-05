@@ -27,7 +27,7 @@ fn process_info(pid: process.Pid, key: atom.Atom) -> Dynamic
 /// Tests in this module only use unnamed and Local-named starts, so this
 /// always succeeds; the assertion documents that assumption.
 fn subject_of(
-  machine: state_machine.Started(message),
+  machine: state_machine.Started(message, reply),
 ) -> process.Subject(message) {
   let assert Ok(s) = state_machine.ref_to_subject(machine.ref)
   s
@@ -118,8 +118,8 @@ pub fn postpone_redelivers_event_after_state_change_test() {
 }
 
 // NEXT EVENT
-// 1. Trigger 
-// 2. NextEvent(Derived) -> internal event fires as Cast (Derived).
+// Insert identical payloads with different OTP event types. They must be
+// delivered distinctly and in action-list order.
 
 type NextEventState {
   NeActive
@@ -138,11 +138,23 @@ fn next_event_handler(
   case event {
     state_machine.Info(Trigger(reply_with: reply_sub)) ->
       state_machine.keep_state(data, [
+        state_machine.NextEvent(state_machine.InternalEvent, Derived(reply_sub)),
         state_machine.NextEvent(state_machine.CastEvent, Derived(reply_sub)),
+        state_machine.NextEvent(state_machine.InfoEvent, Derived(reply_sub)),
       ])
 
     state_machine.Cast(Derived(reply_with: reply_sub)) -> {
-      process.send(reply_sub, "derived")
+      process.send(reply_sub, "cast")
+      state_machine.keep_state(data, [])
+    }
+
+    state_machine.Internal(Derived(reply_sub)) -> {
+      process.send(reply_sub, "internal")
+      state_machine.keep_state(data, [])
+    }
+
+    state_machine.Info(Derived(reply_sub)) -> {
+      process.send(reply_sub, "info")
       state_machine.keep_state(data, [])
     }
 
@@ -150,7 +162,7 @@ fn next_event_handler(
   }
 }
 
-pub fn next_event_fires_synthesised_cast_test() {
+pub fn next_event_preserves_event_types_and_order_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: NeActive, initial_data: Nil)
     |> state_machine.on_event(next_event_handler)
@@ -159,8 +171,33 @@ pub fn next_event_fires_synthesised_cast_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), Trigger(reply_with: reply_sub))
 
-  let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("derived")
+  assert process.receive(reply_sub, 1000) == Ok("internal")
+  assert process.receive(reply_sub, 1000) == Ok("cast")
+  assert process.receive(reply_sub, 1000) == Ok("info")
+  state_machine.stop_server(subject_of(machine))
+}
+
+@external(erlang, "erlang", "send")
+fn raw_send(pid: process.Pid, term: Dynamic) -> Dynamic
+
+pub fn untagged_mailbox_message_is_raw_info_test() {
+  let observed = process.new_subject()
+  let assert Ok(machine) =
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(fn(event, _, _) {
+      case event {
+        state_machine.RawInfo(term) -> process.send(observed, term)
+        _ -> Nil
+      }
+      state_machine.keep_state_and_data([])
+    })
+    |> state_machine.start_link
+
+  // Even an unrelated two-tuple is not a Subject envelope.
+  let foreign = dynamic.array([dynamic.int(17), dynamic.string("payload")])
+  let _ = raw_send(machine.pid, foreign)
+  assert process.receive(observed, 1000) == Ok(foreign)
+  state_machine.stop_server(subject_of(machine))
 }
 
 // STATE TIMEOUT
@@ -1102,7 +1139,7 @@ fn stop_and_reply_handler(
   case event {
     state_machine.Call(from, SarGetAndStop) ->
       state_machine.stop_and_reply(process.Normal, [
-        state_machine.Reply(from, "bye"),
+        #(from, "bye"),
       ])
     _ -> state_machine.keep_state(Nil, [])
   }
@@ -1264,9 +1301,6 @@ type ClientMsg {
   // CliAsk parks the caller's From in an external stash so the test process
   // can reply with send_reply / send_replies from outside the callback.
   CliAsk(stash: process.Subject(state_machine.From(Int)))
-  // CliNoReply intentionally leaves the call without a reply, used to drive
-  // wait_response_timeout into ReceiveTimeout.
-  CliNoReply
 }
 
 fn client_handler(
@@ -1281,7 +1315,6 @@ fn client_handler(
       process.send(stash, from)
       state_machine.keep_state(data, [])
     }
-    state_machine.Call(_from, CliNoReply) -> state_machine.keep_state(data, [])
     _ -> state_machine.keep_state(data, [])
   }
 }
@@ -1325,11 +1358,9 @@ pub fn stop_server_with_custom_reason_test() {
       state_machine.stop_server_with(subject_of(machine), reason, 1000)
     })
 
-  // The exact reason round-tripping through gleam_erlang's monitor decoder
-  // is governed by the existing convert_exit_reason/cast_exit_reason pair;
-  // here we just confirm the 3-arg call drives the machine to terminate.
-  let assert Ok(process.ProcessDown(pid: down_pid, ..)) =
+  let assert Ok(process.ProcessDown(pid: down_pid, reason: observed, ..)) =
     process.selector_receive(sel, 1000)
+  assert observed == reason
   down_pid |> should.equal(machine.pid)
 
   process.flush_messages()
@@ -1389,17 +1420,53 @@ pub fn wait_response_returns_reply_test() {
   value |> should.equal(99)
 }
 
-pub fn wait_response_timeout_yields_receive_timeout_when_no_reply_test() {
+pub fn wait_timeout_preserves_the_request_for_a_later_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
     |> state_machine.start_link
 
-  let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.ref, CliNoReply)
+  let stash = process.new_subject()
+  let req = state_machine.send_request(machine.ref, CliAsk(stash))
+  let assert Ok(from) = process.receive(stash, 1000)
 
-  state_machine.wait_response_timeout(req, 50)
-  |> should.equal(Error(state_machine.ReceiveTimeout))
+  assert state_machine.wait_response_timeout(req, 0)
+    == Error(state_machine.ReceiveTimeout)
+  state_machine.send_reply(from, 31)
+  assert state_machine.receive_response(req, 1000) == Ok(31)
+  state_machine.stop_server(subject_of(machine))
+}
+
+pub fn receive_collection_distinguishes_empty_from_abandoned_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start_link
+
+  let empty = state_machine.request_ids_new()
+  assert state_machine.receive_response_collection(
+      empty,
+      0,
+      state_machine.Delete,
+    )
+    == state_machine.NoRequests
+  let stash = process.new_subject()
+  let request = state_machine.send_request(machine.ref, CliAsk(stash))
+  let pending = state_machine.request_ids_add(request, "held", empty)
+  let assert Ok(from) = process.receive(stash, 1000)
+  assert state_machine.receive_response_collection(
+      pending,
+      0,
+      state_machine.Keep,
+    )
+    == state_machine.CollectionTimeout
+
+  // Reply from this test process itself. A live alias would deliver the
+  // response to our mailbox before the non-blocking poll below.
+  state_machine.send_reply(from, 31)
+  assert state_machine.wait_response_timeout(request, 0)
+    == Error(state_machine.ReceiveTimeout)
+  state_machine.stop_server(subject_of(machine))
 }
 
 pub fn check_response_returns_none_for_unrelated_message_test() {

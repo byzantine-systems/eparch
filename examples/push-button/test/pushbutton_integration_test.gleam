@@ -10,7 +10,7 @@ import eparch/state_machine as sm
 import gleeunit/should
 import pushbutton
 
-fn start() -> sm.ServerRef(pushbutton.Message) {
+fn start() -> sm.ServerRef(pushbutton.Message, pushbutton.Reply) {
   let assert Ok(machine) = pushbutton.start()
   machine.ref
 }
