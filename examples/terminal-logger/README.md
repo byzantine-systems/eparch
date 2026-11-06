@@ -1,6 +1,6 @@
 # Terminal Logger
 
-`gen_event` example for `eparch/event_manager`. Modelled after the
+Actor-based broadcast example for `eparch/event_manager`. Modelled after the
 canonical [`error_man` example from the OTP docs](https://www.erlang.org/doc/system/events.html).
 
 ```mermaid

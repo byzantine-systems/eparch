@@ -1,6 +1,7 @@
 import eparch/event_manager
 import gleam/int
 import gleam/io
+import gleam/option.{None}
 import simplifile
 
 /// The event broadcast across the bus. Plays the role of the `ErrorMsg`
@@ -9,7 +10,7 @@ pub type ErrorEvent {
   Reported(message: String)
 }
 
-/// Start an unnamed `gen_event` manager linked to the caller.
+/// Start an unnamed broadcast manager linked to the caller.
 pub fn start() -> Result(
   event_manager.Manager(ErrorEvent),
   event_manager.StartError,
@@ -17,16 +18,14 @@ pub fn start() -> Result(
   event_manager.start_link(event_manager.new_start_options())
 }
 
-/// Stop the event manager. Every registered handler's `on_terminate`
-/// callback runs before the process exits.
+/// Ask the manager to stop and its handlers to drain.
 pub fn stop(manager: event_manager.Manager(ErrorEvent)) -> Nil {
-  event_manager.stop(manager)
+  event_manager.stop(manager, 1000)
 }
 
 /// Broadcast an error to every registered handler.
 ///
-/// Asynchronous: returns as soon as the manager has accepted the event,
-/// without waiting for handlers to finish processing.
+/// Asynchronous: returns after sending to the manager.
 pub fn report(
   manager: event_manager.Manager(ErrorEvent),
   message: String,
@@ -40,10 +39,7 @@ pub fn report(
 /// termination the handler prints a one-line summary.
 pub fn add_terminal_logger(
   manager: event_manager.Manager(ErrorEvent),
-) -> Result(
-  event_manager.HandlerRef(Nil, Nil),
-  event_manager.AddError(Nil, Nil),
-) {
+) -> Result(event_manager.HandlerRef(ErrorEvent), event_manager.AddError) {
   let handler =
     event_manager.new_handler(0, fn(event, count) {
       let Reported(message) = event
@@ -56,7 +52,7 @@ pub fn add_terminal_logger(
       )
     })
 
-  event_manager.add_handler(manager, handler)
+  event_manager.add_handler(manager, handler, on_down: None)
 }
 
 /// Add a file logger that appends every event to `path`.
@@ -68,10 +64,7 @@ pub fn add_terminal_logger(
 pub fn add_file_logger(
   manager: event_manager.Manager(ErrorEvent),
   path: String,
-) -> Result(
-  event_manager.HandlerRef(Nil, Nil),
-  event_manager.AddError(Nil, Nil),
-) {
+) -> Result(event_manager.HandlerRef(ErrorEvent), event_manager.AddError) {
   let handler =
     event_manager.new_handler(path, fn(event, path) {
       let Reported(message) = event
@@ -79,7 +72,7 @@ pub fn add_file_logger(
       event_manager.Continue(path)
     })
 
-  event_manager.add_handler(manager, handler)
+  event_manager.add_handler(manager, handler, on_down: None)
 }
 
 fn format(message: String) -> String {

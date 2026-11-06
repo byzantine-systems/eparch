@@ -1,18 +1,19 @@
 ////
-//// Integration tests for the terminal-logger gen_event example.
+//// Integration tests for the terminal-logger broadcast example.
 ////
-//// These tests spawn a real gen_event manager and exercise it through
+//// These tests spawn a real actor manager and exercise it through
 //// the public API. Because the bundled `terminal_logger` handler prints
 //// to stdout (which is hard to capture in a unit test), most tests
 //// install an in-test **collector** handler that forwards each received
 //// event to a `process.Subject`. That handler shares the manager with
 //// the production handlers, demonstrating the fan-out behaviour of
-//// `gen_event`.
+//// the bus.
 ////
 
 import eparch/event_manager
 import gleam/erlang/process
 import gleam/list
+import gleam/option.{None}
 import gleeunit/should
 import simplifile
 import terminal_logger.{type ErrorEvent, Reported}
@@ -24,14 +25,15 @@ import terminal_logger.{type ErrorEvent, Reported}
 fn install_collector(
   manager: event_manager.Manager(ErrorEvent),
   subject: process.Subject(ErrorEvent),
-) -> event_manager.HandlerRef(Nil, Nil) {
+) -> event_manager.HandlerRef(ErrorEvent) {
   let handler =
     event_manager.new_handler(Nil, fn(event, state) {
       process.send(subject, event)
       event_manager.Continue(state)
     })
 
-  let assert Ok(ref) = event_manager.add_handler(manager, handler)
+  let assert Ok(ref) =
+    event_manager.add_handler(manager, handler, on_down: None)
   ref
 }
 
@@ -53,7 +55,7 @@ fn collect(subject: process.Subject(ErrorEvent), n: Int) -> List(ErrorEvent) {
 /// A freshly started manager has no handlers registered.
 pub fn fresh_manager_has_no_handlers_test() {
   let assert Ok(manager) = terminal_logger.start()
-  event_manager.which_handlers(manager) |> should.equal([])
+  assert event_manager.which_handlers(manager) == Ok([])
   terminal_logger.stop(manager)
 }
 
@@ -102,7 +104,7 @@ pub fn removed_handler_stops_receiving_events_test() {
 
   terminal_logger.report(manager, "before")
 
-  let assert Ok(Nil) = event_manager.remove_handler(manager, ref_removed)
+  let assert Ok(Nil) = event_manager.remove_handler(manager, ref_removed, 1000)
 
   terminal_logger.report(manager, "after")
 
@@ -123,8 +125,10 @@ pub fn file_logger_appends_each_event_to_file_test() {
   let assert Ok(_ref) = terminal_logger.add_file_logger(manager, path)
 
   // Use sync_notify so we know the file has been written before reading.
-  event_manager.sync_notify(manager, Reported("alpha"))
-  event_manager.sync_notify(manager, Reported("beta"))
+  assert event_manager.sync_notify(manager, Reported("alpha"), 1000)
+    == event_manager.Confirmed
+  assert event_manager.sync_notify(manager, Reported("beta"), 1000)
+    == event_manager.Confirmed
 
   let assert Ok(contents) = simplifile.read(path)
   contents
@@ -140,7 +144,8 @@ pub fn terminal_logger_registers_with_manager_test() {
   let assert Ok(manager) = terminal_logger.start()
 
   let assert Ok(_ref) = terminal_logger.add_terminal_logger(manager)
-  event_manager.which_handlers(manager) |> list.length |> should.equal(1)
+  let assert Ok(handlers) = event_manager.which_handlers(manager)
+  assert list.length(handlers) == 1
 
   terminal_logger.stop(manager)
 }
