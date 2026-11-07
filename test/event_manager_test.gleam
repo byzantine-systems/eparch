@@ -214,3 +214,45 @@ pub fn abrupt_manager_death_does_not_orphan_idle_handler_test() {
   let assert Ok(process.ProcessDown(pid: dead, ..)) = down
   assert dead == worker
 }
+
+pub fn replacement_drains_the_old_snapshot_without_reusing_identity_test() {
+  let manager = start()
+  let other = start()
+  let old_trace = process.new_subject()
+  let new_trace = process.new_subject()
+  let done = process.new_subject()
+  let old_handler =
+    collector(old_trace) |> bus.on_terminate(fn(_) { process.send(done, Nil) })
+  let assert Ok(old) = bus.add_handler(manager, old_handler, on_down: None)
+  let assert Ok(_) = bus.add_handler(other, collector(new_trace), on_down: None)
+  assert bus.remove_handler(other, old, wait) == Error(bus.HandlerNotFound)
+  bus.notify(manager, 1)
+  let assert Ok(_) =
+    bus.replace_handler(manager, old, collector(new_trace), on_down: None)
+  assert bus.replace_handler(manager, old, collector(new_trace), on_down: None)
+    == Error(bus.StaleRef)
+  assert bus.sync_notify(manager, 2, wait) == bus.Confirmed
+  take(done)
+  bus.stop(manager, wait)
+  bus.stop(other, wait)
+  assert received(old_trace) == [1]
+  assert received(new_trace) == [2]
+}
+
+pub fn reentrant_barrier_rejects_before_dispatch_test() {
+  let manager = start()
+  let results = process.new_subject()
+  let handler =
+    bus.new_handler(Nil, fn(n, _) {
+      case n {
+        0 -> process.send(results, bus.sync_notify(manager, 1, wait))
+        _ -> process.send(results, bus.Confirmed)
+      }
+      bus.Continue(Nil)
+    })
+  let assert Ok(ref) = bus.add_handler(manager, handler, on_down: None)
+  assert bus.sync_notify(manager, 0, wait) == bus.Confirmed
+  assert bus.remove_handler(manager, ref, wait) == Ok(Nil)
+  bus.stop(manager, wait)
+  assert received(results) == [bus.SyncBusy]
+}
