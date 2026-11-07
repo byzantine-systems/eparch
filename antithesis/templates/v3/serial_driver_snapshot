@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/sdk/bin/python /opt/antithesis/catalog/driver.py "$@"

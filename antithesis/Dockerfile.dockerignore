@@ -1,0 +1,11 @@
+**
+!gleam.toml
+!manifest.toml
+!src/
+!src/**
+src/**/_build/
+!antithesis/
+!antithesis/driver.py
+!antithesis/probe.erl
+!antithesis/templates/
+!antithesis/templates/**
