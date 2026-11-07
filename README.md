@@ -19,7 +19,8 @@ Eparch is a Gleam library that wraps certain Erlang/OTP behaviours with a type-s
 | Module | Wraps | Purpose |
 |---|---|---|
 | `eparch/state_machine` | [`gen_statem`](https://www.erlang.org/doc/apps/stdlib/gen_statem.html) | Type-safe finite state machines |
-| `eparch/event_manager` | [`gen_event`](https://www.erlang.org/doc/apps/stdlib/gen_event.html) | Broadcast event managers with dynamic handlers |
+| `eparch/event_manager` | Gleam OTP actors | Broadcast to independently scheduled handlers |
+| `eparch/machine`, `eparch/machine/otp` | Logical clock or `gen_statem` | Run the same transition functions in tests and in a process |
 
 Full API reference: <https://hexdocs.pm/eparch>.
 
@@ -29,9 +30,9 @@ Full API reference: <https://hexdocs.pm/eparch>.
 
 | Erlang's `gen_statem` | `eparch/state_machine` |
 |---|---|
-| Separate `handle_call`, `handle_cast`, `handle_info` | Single handler dispatching on a unified `Event` type |
+| Event type and payload passed separately | Single handler dispatching on a unified `Event` type |
 | Raw action tuples | Type-safe `Action` values |
-| `state_enter` always on | Opt-in via `with_state_enter()` |
+| Optional `state_enter` callback mode | Opt-in via `with_state_enter()` |
 | Multiple return tuple formats | Single `Step` type (`NextState`, `KeepState`, `Stop`) |
 
 ### Key Differences from `gen_event`
@@ -41,7 +42,13 @@ Full API reference: <https://hexdocs.pm/eparch>.
 | Separate handler callback module per handler | Single `Handler` builder (`new_handler/2`, `on_terminate/2`) |
 | Handler identified by `{Module, Id}` tuple | Opaque `HandlerRef` returned by `add_handler` |
 | `handle_call` for per-handler queries | Embed `process.Subject(reply)` in your event type instead |
-| `add_sup_handler` | `add_supervised_handler` |
+| All handlers share a process | One linked worker per handler; manager handles worker exits |
+
+`notify` sends without waiting. `sync_notify` freezes membership on acceptance:
+`Confirmed` means every callback in that snapshot returned. `Unconfirmed` is
+not proof of non-processing. `SyncBusy` rejects before dispatch; `SyncTimeout`
+ends the caller's wait without cancelling work. Removal drains earlier
+broadcasts. `replace_handler` starts the replacement with its own initial state.
 
 ## Installation
 

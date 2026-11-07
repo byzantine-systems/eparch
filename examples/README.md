@@ -29,7 +29,7 @@ A code-protected door lock. Also an example from the [docs](https://www.erlang.o
 - The door auto-relocks after a configurable timeout via `StateTimeout`.
 - Demonstrates `with_state_enter` to arm the timer on every entry to the `Open` state.
 
-## Event Handler (`gen_event`)
+## Event Manager
 
 | Example | Description |
 |---|---|
@@ -37,7 +37,7 @@ A code-protected door lock. Also an example from the [docs](https://www.erlang.o
 
 ### Terminal Logger
 
-A pair of `gen_event` handlers wired to a single event bus. Modelled after the canonical [`error_man` example from the OTP docs](https://www.erlang.org/doc/system/events.html).
+A terminal writer and a file writer subscribe to the same event bus. Each has its own actor and mailbox.
 
 - `add_terminal_logger`: prints each event to stdout and tracks a count
 - `add_file_logger`: appends each event to a file path
