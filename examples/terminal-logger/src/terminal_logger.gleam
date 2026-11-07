@@ -19,7 +19,9 @@ pub fn start() -> Result(
 }
 
 /// Ask the manager to stop and its handlers to drain.
-pub fn stop(manager: event_manager.Manager(ErrorEvent)) -> Nil {
+pub fn stop(
+  manager: event_manager.Manager(ErrorEvent),
+) -> Result(Nil, event_manager.StopError) {
   event_manager.stop(manager, 1000)
 }
 

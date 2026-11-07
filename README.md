@@ -50,6 +50,10 @@ not proof of non-processing. `SyncBusy` rejects before dispatch; `SyncTimeout`
 ends the caller's wait without cancelling work. Removal drains earlier
 broadcasts. `replace_handler` starts the replacement with its own initial state.
 
+Timed event-manager requests use process aliases (OTP 24+): a timeout retires
+the reply address without cancelling work. `stop` returns `Ok(Nil)` on
+acceptance or a `StopError` if acceptance could not be observed.
+
 ## Installation
 
 ```sh

@@ -45,6 +45,26 @@ pub type HandlerDown {
 @external(erlang, "eparch_delivery_ffi", "notify_observer")
 fn notify_observer(observer: Subject(HandlerDown), event: HandlerDown) -> Nil
 
+type Waiter(value)
+
+type WaitError {
+  WaitTimeout
+  WaitDown
+}
+
+@external(erlang, "eparch_delivery_ffi", "request")
+fn request(
+  pid: Pid,
+  timeout: Int,
+  send: fn(Waiter(value), Int) -> Nil,
+) -> Result(value, WaitError)
+
+@external(erlang, "eparch_delivery_ffi", "respond")
+fn respond(to: Waiter(value), value: value) -> Nil
+
+@external(erlang, "eparch_delivery_ffi", "now_ms")
+fn now_ms() -> Int
+
 /// Timeout does not cancel dispatch. Busy means no dispatch took place.
 pub type SyncResult {
   Confirmed
@@ -94,8 +114,8 @@ pub opaque type Manager(event) {
 }
 
 type Envelope(event) {
-  Deliver(event, Option(Subject(SyncResult)))
-  Drain(Option(Subject(Result(Nil, RemoveError))))
+  Deliver(event, Option(Waiter(SyncResult)))
+  Drain(Option(Waiter(Result(Nil, RemoveError))))
 }
 
 type Entry(event) {
@@ -107,6 +127,7 @@ type Pending {
     remaining: Set(HandlerId),
     lost: List(HandlerId),
     expiry: process.Timer,
+    deadline: Int,
   )
 }
 
@@ -116,14 +137,14 @@ type Cmd(event) {
     fn() -> Result(Entry(event), StartError),
     Subject(Result(HandlerRef(event), AddError)),
   )
-  Retire(HandlerId, Subject(Result(Nil, RemoveError)))
+  Retire(HandlerId, Waiter(Result(Nil, RemoveError)))
   Which(Subject(List(HandlerId)))
   Notify(event)
-  Sync(event, Pid, Int, Subject(SyncResult))
-  Ack(Subject(SyncResult), HandlerId)
-  Expire(Subject(SyncResult))
+  Sync(event, Pid, Int, Waiter(SyncResult))
+  Ack(Waiter(SyncResult), HandlerId)
+  Expire(Waiter(SyncResult))
   Exited(process.ExitMessage)
-  Shutdown(Subject(Nil))
+  Shutdown(Waiter(Nil))
 }
 
 type Registry(event) {
@@ -132,7 +153,7 @@ type Registry(event) {
     parent: Option(Pid),
     active: List(Entry(event)),
     retiring: Dict(HandlerId, Entry(event)),
-    pending: Dict(Subject(SyncResult), Pending),
+    pending: Dict(Waiter(SyncResult), Pending),
     max: Int,
   )
 }
@@ -222,7 +243,7 @@ fn handle(s: Registry(event), command: Cmd(event)) {
       case list.find(s.active, fn(e) { e.ref.id == id }) {
         Ok(e) -> actor.continue(retire(s, e, Some(reply)))
         Error(_) -> {
-          process.send(reply, Error(HandlerNotFound))
+          respond(reply, Error(HandlerNotFound))
           actor.continue(s)
         }
       }
@@ -234,27 +255,42 @@ fn handle(s: Registry(event), command: Cmd(event)) {
       dispatch(s.active, event, None)
       actor.continue(s)
     }
-    Sync(event, caller, timeout, reply) -> {
+    Sync(event, caller, deadline, reply) -> {
+      let now = now_ms()
+      let s =
+        Registry(
+          ..s,
+          pending: dict.filter(s.pending, fn(_, p) { p.deadline > now }),
+        )
       let ids = set.from_list(list.map(s.active, fn(e) { e.ref.id }))
       case
         dict.size(s.pending) >= s.max || set.contains(ids, HandlerId(caller)),
         s.active
       {
         True, _ -> {
-          process.send(reply, SyncBusy)
+          respond(reply, SyncBusy)
           actor.continue(s)
         }
         False, [] -> {
-          process.send(reply, Confirmed)
+          respond(reply, Confirmed)
+          actor.continue(s)
+        }
+        False, _ if deadline <= now -> {
+          dispatch(s.active, event, None)
+          respond(reply, SyncTimeout)
           actor.continue(s)
         }
         False, _ -> {
-          let timer = process.send_after(s.inbox, timeout, Expire(reply))
+          let timer = process.send_after(s.inbox, deadline - now, Expire(reply))
           dispatch(s.active, event, Some(reply))
           actor.continue(
             Registry(
               ..s,
-              pending: dict.insert(s.pending, reply, Pending(ids, [], timer)),
+              pending: dict.insert(
+                s.pending,
+                reply,
+                Pending(ids, [], timer, deadline),
+              ),
             ),
           )
         }
@@ -298,12 +334,9 @@ fn handle(s: Registry(event), command: Cmd(event)) {
     Shutdown(reply) -> {
       list.each(s.active, fn(e) { process.send(e.ref.inbox, Drain(None)) })
       dict.each(s.pending, fn(k, p) {
-        process.send(
-          k,
-          Unconfirmed(list.append(set.to_list(p.remaining), p.lost)),
-        )
+        respond(k, Unconfirmed(list.append(set.to_list(p.remaining), p.lost)))
       })
-      process.send(reply, Nil)
+      respond(reply, Nil)
       actor.stop()
     }
   }
@@ -324,7 +357,7 @@ fn retire(s: Registry(event), e: Entry(event), reply) {
   )
 }
 
-fn account(all: Dict(Subject(SyncResult), Pending), key, id, died) {
+fn account(all: Dict(Waiter(SyncResult), Pending), key, id, died) {
   case dict.get(all, key) {
     Error(_) -> all
     Ok(p) ->
@@ -339,7 +372,7 @@ fn account(all: Dict(Subject(SyncResult), Pending), key, id, died) {
           case set.size(remaining) {
             0 -> {
               let _ = process.cancel_timer(p.expiry)
-              process.send(key, case lost {
+              respond(key, case lost {
                 [] -> Confirmed
                 _ -> Unconfirmed(lost)
               })
@@ -394,7 +427,7 @@ fn spawn_worker(manager: Manager(event), handler: Handler(state, event), down) {
         Drain(reply) -> {
           handler.cleanup(state)
           case reply {
-            Some(r) -> process.send(r, Ok(Nil))
+            Some(r) -> respond(r, Ok(Nil))
             None -> Nil
           }
           actor.stop()
@@ -450,11 +483,14 @@ pub fn remove_handler(
   ref: HandlerRef(event),
   timeout: Int,
 ) -> Result(Nil, RemoveError) {
-  let reply = process.new_subject()
-  process.send(manager.subject, Retire(ref.id, reply))
-  case process.receive(reply, int.max(timeout, 0)) {
+  let outcome =
+    request(manager.pid, timeout, fn(reply, _) {
+      process.send(manager.subject, Retire(ref.id, reply))
+    })
+  case outcome {
     Ok(r) -> r
-    Error(_) -> Error(RemoveTimedOut)
+    Error(WaitDown) -> Error(DrainInterrupted)
+    Error(WaitTimeout) -> Error(RemoveTimedOut)
   }
 }
 
@@ -488,10 +524,10 @@ pub fn sync_notify(
   event: event,
   timeout: Int,
 ) -> SyncResult {
-  let reply = process.new_subject()
-  let timeout = int.max(timeout, 0)
-  process.send(manager.subject, Sync(event, process.self(), timeout, reply))
-  process.receive(reply, timeout) |> result.unwrap(SyncTimeout)
+  request(manager.pid, timeout, fn(reply, deadline) {
+    process.send(manager.subject, Sync(event, process.self(), deadline, reply))
+  })
+  |> result.unwrap(SyncTimeout)
 }
 
 /// Bypass the manager. There is no order guarantee relative to broadcasts
@@ -502,9 +538,19 @@ pub fn send_to(ref: HandlerRef(event), event: event) -> Nil {
 
 /// Signal all current workers to drain. This waits for manager acceptance,
 /// not completion of cleanup on each worker.
-pub fn stop(manager: Manager(event), timeout: Int) -> Nil {
-  let reply = process.new_subject()
-  process.send(manager.subject, Shutdown(reply))
-  let _ = process.receive(reply, int.max(timeout, 0))
-  Nil
+pub fn stop(manager: Manager(event), timeout: Int) -> Result(Nil, StopError) {
+  request(manager.pid, timeout, fn(reply, _) {
+    process.send(manager.subject, Shutdown(reply))
+  })
+  |> result.map_error(fn(error) {
+    case error {
+      WaitDown -> AlreadyStopped
+      WaitTimeout -> StopTimedOut
+    }
+  })
+}
+
+pub type StopError {
+  AlreadyStopped
+  StopTimedOut
 }

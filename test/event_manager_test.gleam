@@ -64,7 +64,7 @@ pub fn absent_named_observer_cannot_crash_the_manager_test() {
   let assert bus.Unconfirmed([_]) = bus.sync_notify(manager, 1, wait)
   assert bus.sync_notify(manager, 2, wait) == bus.Confirmed
   assert received(events) == [1, 2]
-  bus.stop(manager, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
 }
 
 pub fn subscription_history_test() {
@@ -111,7 +111,7 @@ pub fn subscription_history_test() {
     Nil
   })
   let remaining = bus.which_handlers(manager)
-  bus.stop(manager, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
   assert remaining == Ok([])
   assert list.length(ids) == dict.size(active)
   assert list.unique(ids) == ids
@@ -143,7 +143,7 @@ pub fn callback_crash_spares_registrar_and_sibling_test() {
   let down = process.receive(survived, wait)
   let remaining = bus.which_handlers(manager)
   let next = bus.sync_notify(manager, 2, wait)
-  bus.stop(manager, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
   assert outcome == bus.Unconfirmed([failed])
   let assert Ok(bus.HandlerDown(id, reason)) = down
   assert id == failed
@@ -188,7 +188,7 @@ pub fn stalled_handler_does_not_block_dispatch_or_cancel_timed_out_work_test() {
   let drained = take(cleanup)
   let stale = bus.remove_handler(manager, ref, wait)
   let next = bus.sync_notify(manager, 3, wait)
-  bus.stop(manager, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
   assert outcome == bus.SyncTimeout
   assert #(first, second) == #(1, 2)
   assert removal == Error(bus.RemoveTimedOut)
@@ -249,8 +249,8 @@ pub fn replacement_drains_the_old_snapshot_without_reusing_identity_test() {
     == Error(bus.StaleRef)
   assert bus.sync_notify(manager, 2, wait) == bus.Confirmed
   take(done)
-  bus.stop(manager, wait)
-  bus.stop(other, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
+  assert bus.stop(other, wait) == Ok(Nil)
   assert received(old_trace) == [1]
   assert received(new_trace) == [2]
 }
@@ -269,6 +269,6 @@ pub fn reentrant_barrier_rejects_before_dispatch_test() {
   let assert Ok(ref) = bus.add_handler(manager, handler, on_down: None)
   assert bus.sync_notify(manager, 0, wait) == bus.Confirmed
   assert bus.remove_handler(manager, ref, wait) == Ok(Nil)
-  bus.stop(manager, wait)
+  assert bus.stop(manager, wait) == Ok(Nil)
   assert received(results) == [bus.SyncBusy]
 }
