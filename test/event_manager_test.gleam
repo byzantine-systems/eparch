@@ -51,6 +51,22 @@ fn collector(inbox: Subject(a)) {
   })
 }
 
+pub fn absent_named_observer_cannot_crash_the_manager_test() {
+  let manager = start()
+  let name = process.new_name("observer")
+  let assert Ok(_) = process.register(process.self(), name)
+  let crash = bus.new_handler(Nil, fn(_, _) { panic as "injected failure" })
+  let assert Ok(_) =
+    bus.add_handler(manager, crash, on_down: Some(process.named_subject(name)))
+  let events = process.new_subject()
+  let assert Ok(_) = bus.add_handler(manager, collector(events), on_down: None)
+  let assert Ok(_) = process.unregister(name)
+  let assert bus.Unconfirmed([_]) = bus.sync_notify(manager, 1, wait)
+  assert bus.sync_notify(manager, 2, wait) == bus.Confirmed
+  assert received(events) == [1, 2]
+  bus.stop(manager, wait)
+}
+
 pub fn subscription_history_test() {
   let slots = [0, 1, 2]
   let command =

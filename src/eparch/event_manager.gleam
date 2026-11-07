@@ -42,6 +42,9 @@ pub type HandlerDown {
   HandlerDown(id: HandlerId, reason: ExitReason)
 }
 
+@external(erlang, "eparch_delivery_ffi", "notify_observer")
+fn notify_observer(observer: Subject(HandlerDown), event: HandlerDown) -> Nil
+
 /// Timeout does not cancel dispatch. Busy means no dispatch took place.
 pub type SyncResult {
   Confirmed
@@ -275,7 +278,7 @@ fn handle(s: Registry(event), command: Cmd(event)) {
           let entries = list.append(s.active, dict.values(s.retiring))
           case list.find(entries, fn(e) { e.ref.id == id }), reason {
             Ok(Entry(_, Some(down))), r if r != process.Normal ->
-              process.send(down, HandlerDown(id, r))
+              notify_observer(down, HandlerDown(id, r))
             _, _ -> Nil
           }
           let pending =
