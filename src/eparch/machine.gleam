@@ -193,10 +193,41 @@ pub fn step(
   machine: Machine(state, data, msg, reply),
   input: Input(msg, reply),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
+  step_with_budget(machine, input, delivery_fuel)
+}
+
+/// Queue an input and process up to `budget` inputs. Inspect `progress` on
+/// the returned machine before treating its data as a settled observation.
+pub fn step_with_budget(
+  machine: Machine(state, data, msg, reply),
+  input: Input(msg, reply),
+  budget: Int,
+) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
   case machine.stopped {
     Some(_) -> #([], machine)
-    None -> settle(enqueue_newest(machine, input, None), delivery_fuel, [])
+    None -> resume(enqueue_newest(machine, input, None), budget)
   }
+}
+
+pub type Progress {
+  Settled
+  NeedsResume
+}
+
+/// Whether there is runnable work left at the current logical instant.
+pub fn progress(machine: Machine(state, data, msg, reply)) -> Progress {
+  case machine.queue, machine.stopped {
+    [_, ..], None -> NeedsResume
+    _, _ -> Settled
+  }
+}
+
+/// Continue queued work without adding an input or advancing the clock.
+pub fn resume(
+  machine: Machine(state, data, msg, reply),
+  budget: Int,
+) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
+  settle(machine, budget, [])
 }
 
 /// Advance the logical clock by `milliseconds`, turning every timer whose
@@ -257,14 +288,24 @@ fn settle(
   fuel: Int,
   collected: List(Effect(msg, reply)),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
+  settle_loop(machine, fuel, list.reverse(collected))
+}
+
+fn settle_loop(
+  machine: Machine(state, data, msg, reply),
+  fuel: Int,
+  reversed: List(Effect(msg, reply)),
+) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
   case machine.queue, machine.stopped, fuel <= 0 {
-    [], _, _ -> #(collected, machine)
-    _, Some(_), _ -> #(collected, machine)
-    _, _, True -> #(collected, machine)
+    [], _, _ | _, Some(_), _ | _, _, True -> #(list.reverse(reversed), machine)
     [first, ..rest], None, False -> {
       let machine = Machine(..machine, queue: rest)
       let #(effects, machine) = process(machine, first.input)
-      settle(machine, fuel - 1, list.append(collected, effects))
+      settle_loop(
+        machine,
+        fuel - 1,
+        list.fold(effects, reversed, fn(acc, effect) { [effect, ..acc] }),
+      )
     }
   }
 }

@@ -18,6 +18,29 @@ fn assert_true(condition: Bool, label: String) {
   }
 }
 
+pub fn resuming_preserves_the_ordered_effect_trace_test() {
+  use depth <- qcheck.given(qcheck.bounded_int(2, 30))
+  let chain =
+    machine.new(Nil, [], fn(input, _, seen) {
+      case input {
+        machine.Cast(n) if n > 0 ->
+          machine.KeepState([n, ..seen], [
+            effect.NextEvent(effect.CastEvent, n - 1),
+            effect.Hibernate,
+          ])
+        _ -> machine.KeepState([0, ..seen], [])
+      }
+    })
+  let #(whole, final) = machine.step(chain, machine.Cast(depth))
+  let #(first, partial) =
+    machine.step_with_budget(chain, machine.Cast(depth), 1)
+  assert machine.progress(partial) == machine.NeedsResume
+  let #(rest, resumed) = machine.resume(partial, depth)
+  assert machine.progress(resumed) == machine.Settled
+  assert list.append(first, rest) == whole
+  assert machine.data(resumed) == machine.data(final)
+}
+
 // ---------------------------------------------------------------------------
 // Workhorse machine: rich enough to exercise state changes, data changes,
 // inserted internal events, postponement, timer arming, and replies.
