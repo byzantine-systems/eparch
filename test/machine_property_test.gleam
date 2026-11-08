@@ -385,6 +385,29 @@ fn enter_fixture() -> Machine(Int, List(Int), EOp, Nil) {
   })
 }
 
+pub fn initial_entry_runs_once_before_the_first_input_test() {
+  let #(_, stepped) = machine.step(enter_fixture(), machine.Cast(EGoNext))
+  let #(again, stepped) = machine.begin(stepped)
+  assert again == []
+  assert machine.data(stepped) == [0, 0]
+}
+
+pub fn advancing_time_rearms_relative_to_the_end_of_the_jump_test() {
+  let timer = effect.StateTimeout(effect.After(5), Nil)
+  let clock =
+    machine.new(Nil, 0, fn(_, _, fired) {
+      machine.KeepState(fired + 1, [timer])
+    })
+    |> machine.with_state_enter(fn(_, _) {
+      machine.EnterKeepData([
+        effect.EntryArm(effect.StateTimer, effect.After(5), Nil),
+      ])
+    })
+  let #(_, jumped) = machine.advance_time(clock, 10)
+  assert machine.data(jumped) == 1
+  assert machine.pending_timeouts(jumped) == [#(effect.StateTimer, 5, Nil)]
+}
+
 fn enter_handler(
   input: Input(EOp, Nil),
   phase: Int,

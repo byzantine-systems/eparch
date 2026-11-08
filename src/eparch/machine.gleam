@@ -125,6 +125,7 @@ pub opaque type Machine(state, data, msg, reply) {
     queue: List(Queued(msg, reply)),
     stopped: Option(ExitReason),
     next_armed_at: Int,
+    initialised: Bool,
   )
 }
 
@@ -132,9 +133,8 @@ const delivery_fuel = 65_536
 
 /// Build a machine in its initial phase with the given data and handler.
 ///
-/// If you enable the enter callback with `with_state_enter`, also call
-/// `begin` once to fire the initial enter (with the old phase equal to the
-/// initial one, mirroring `gen_statem`).
+/// The first drive runs the initial entry before delivering input. Use
+/// `begin` to observe its effects separately.
 ///
 pub fn new(
   phase phase: state,
@@ -153,6 +153,7 @@ pub fn new(
     queue: [],
     stopped: None,
     next_armed_at: 0,
+    initialised: False,
   )
 }
 
@@ -174,12 +175,22 @@ pub fn with_state_enter(
 pub fn begin(
   machine: Machine(state, data, msg, reply),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.on_enter, machine.stopped {
-    Some(_), None -> {
-      let #(effects, machine) = fire_enter(machine, machine.phase)
-      settle(apply_timers(machine, effects), delivery_fuel, effects)
+  case machine.initialised {
+    True -> #([], machine)
+    False -> resume(machine, delivery_fuel)
+  }
+}
+
+fn initialise(
+  machine: Machine(state, data, msg, reply),
+) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
+  case machine.initialised {
+    True -> #([], machine)
+    False -> {
+      let #(effects, entered) =
+        fire_enter(Machine(..machine, initialised: True), machine.phase)
+      #(effects, apply_timers(entered, effects))
     }
-    _, _ -> #([], machine)
   }
 }
 
@@ -205,7 +216,10 @@ pub fn step_with_budget(
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
   case machine.stopped {
     Some(_) -> #([], machine)
-    None -> resume(enqueue_newest(machine, input, None), budget)
+    None -> {
+      let #(entry, machine) = initialise(machine)
+      settle(enqueue_newest(machine, input, None), budget, entry)
+    }
   }
 }
 
@@ -227,24 +241,28 @@ pub fn resume(
   machine: Machine(state, data, msg, reply),
   budget: Int,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  settle(machine, budget, [])
+  let #(entry, machine) = initialise(machine)
+  settle(machine, budget, entry)
 }
 
 /// Advance the logical clock by `milliseconds`, turning every timer whose
 /// deadline has been reached into a delivered `Timeout` input, newest after
 /// any already-queued events, then settling the whole queue.
+/// This is a clock jump: a callback rearming a relative timer uses the new
+/// clock reading rather than the nominal deadline of the expired timer.
 ///
 pub fn advance_time(
   machine: Machine(state, data, msg, reply),
   milliseconds: Int,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
+  let #(entry, machine) = begin(machine)
   case machine.stopped {
-    Some(_) -> #([], machine)
+    Some(_) -> #(entry, machine)
     None -> {
       let machine =
         Machine(..machine, clock: machine.clock + int.max(0, milliseconds))
       let machine = enqueue_due(machine)
-      settle(machine, delivery_fuel, [])
+      settle(machine, delivery_fuel, entry)
     }
   }
 }
