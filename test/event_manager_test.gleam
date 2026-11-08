@@ -51,6 +51,18 @@ fn collector(inbox: Subject(a)) {
   })
 }
 
+pub fn cleanup_crash_interrupts_an_accepted_drain_test() {
+  let manager = start()
+  let handler =
+    collector(process.new_subject())
+    |> bus.on_terminate(fn(_) { panic as "cleanup failed" })
+  let assert Ok(ref) = bus.add_handler(manager, handler, on_down: None)
+  assert bus.remove_handler(manager, ref, wait) == Error(bus.DrainInterrupted)
+  assert bus.which_handlers(manager) == Ok([])
+  assert bus.stop(manager, wait) == Ok(Nil)
+  assert bus.stop(manager, wait) == Error(bus.AlreadyStopped)
+}
+
 pub fn absent_named_observer_cannot_crash_the_manager_test() {
   let manager = start()
   let name = process.new_name("observer")

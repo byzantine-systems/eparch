@@ -115,11 +115,23 @@ pub opaque type Manager(event) {
 
 type Envelope(event) {
   Deliver(event, Option(Waiter(SyncResult)))
-  Drain(Option(Waiter(Result(Nil, RemoveError))))
+  Drain
 }
 
 type Entry(event) {
   Entry(ref: HandlerRef(event), on_down: Option(Subject(HandlerDown)))
+}
+
+type DrainWaiter =
+  Waiter(Result(Nil, RemoveError))
+
+type Retiring(event) {
+  Retiring(entry: Entry(event), waiter: Option(DrainWaiter))
+}
+
+type Receipt {
+  Acknowledged
+  Lost
 }
 
 type Pending {
@@ -138,6 +150,7 @@ type Cmd(event) {
     Subject(Result(HandlerRef(event), AddError)),
   )
   Retire(HandlerId, Waiter(Result(Nil, RemoveError)))
+  Drained(HandlerId)
   Which(Subject(List(HandlerId)))
   Notify(event)
   Sync(event, Pid, Int, Waiter(SyncResult))
@@ -152,7 +165,7 @@ type Registry(event) {
     inbox: Subject(Cmd(event)),
     parent: Option(Pid),
     active: List(Entry(event)),
-    retiring: Dict(HandlerId, Entry(event)),
+    retiring: Dict(HandlerId, Retiring(event)),
     pending: Dict(Waiter(SyncResult), Pending),
     max: Int,
   )
@@ -175,7 +188,10 @@ pub fn start_monitor(
   #(manager, process.monitor(manager.pid))
 }
 
-fn launch(options: StartOptions, linked: Bool) {
+fn launch(
+  options: StartOptions,
+  linked: Bool,
+) -> Result(Manager(event), StartError) {
   let caller = process.self()
   use started <- result.map(
     actor.new_with_initialiser(options.init_timeout, fn(inbox) {
@@ -210,7 +226,10 @@ fn launch(options: StartOptions, linked: Bool) {
   Manager(started.pid, started.data)
 }
 
-fn handle(s: Registry(event), command: Cmd(event)) {
+fn handle(
+  s: Registry(event),
+  command: Cmd(event),
+) -> actor.Next(Registry(event), Cmd(event)) {
   case command {
     Install(old, spawn, reply) -> {
       let previous =
@@ -247,6 +266,13 @@ fn handle(s: Registry(event), command: Cmd(event)) {
           actor.continue(s)
         }
       }
+    Drained(id) -> {
+      case dict.get(s.retiring, id) {
+        Ok(Retiring(_, Some(waiter))) -> respond(waiter, Ok(Nil))
+        _ -> Nil
+      }
+      actor.continue(Registry(..s, retiring: dict.delete(s.retiring, id)))
+    }
     Which(reply) -> {
       process.send(reply, list.reverse(list.map(s.active, fn(e) { e.ref.id })))
       actor.continue(s)
@@ -297,21 +323,26 @@ fn handle(s: Registry(event), command: Cmd(event)) {
       }
     }
     Ack(key, id) ->
-      actor.continue(Registry(..s, pending: account(s.pending, key, id, False)))
+      actor.continue(
+        Registry(..s, pending: account(s.pending, key, id, Acknowledged)),
+      )
     Expire(key) ->
       actor.continue(Registry(..s, pending: dict.delete(s.pending, key)))
     Exited(process.ExitMessage(pid, reason)) ->
       case Some(pid) == s.parent {
         True -> {
           // Propagate parent shutdown to workers even if a callback is blocked.
-          list.each(list.append(s.active, dict.values(s.retiring)), fn(e) {
-            process.kill(e.ref.id.pid)
-          })
+          list.each(all_entries(s), fn(e) { process.kill(e.ref.id.pid) })
           actor.stop()
         }
         False -> {
           let id = HandlerId(pid)
-          let entries = list.append(s.active, dict.values(s.retiring))
+          case dict.get(s.retiring, id) {
+            Ok(Retiring(_, Some(waiter))) ->
+              respond(waiter, Error(DrainInterrupted))
+            _ -> Nil
+          }
+          let entries = all_entries(s)
           case list.find(entries, fn(e) { e.ref.id == id }), reason {
             Ok(Entry(_, Some(down))), r if r != process.Normal ->
               notify_observer(down, HandlerDown(id, r))
@@ -319,7 +350,7 @@ fn handle(s: Registry(event), command: Cmd(event)) {
           }
           let pending =
             list.fold(dict.keys(s.pending), s.pending, fn(p, k) {
-              account(p, k, id, True)
+              account(p, k, id, Lost)
             })
           actor.continue(
             Registry(
@@ -332,7 +363,7 @@ fn handle(s: Registry(event), command: Cmd(event)) {
         }
       }
     Shutdown(reply) -> {
-      list.each(s.active, fn(e) { process.send(e.ref.inbox, Drain(None)) })
+      list.each(s.active, fn(e) { process.send(e.ref.inbox, Drain) })
       dict.each(s.pending, fn(k, p) {
         respond(k, Unconfirmed(list.append(set.to_list(p.remaining), p.lost)))
       })
@@ -342,22 +373,42 @@ fn handle(s: Registry(event), command: Cmd(event)) {
   }
 }
 
-fn dispatch(entries, event, delivery) {
+fn all_entries(registry: Registry(event)) -> List(Entry(event)) {
+  list.append(
+    registry.active,
+    list.map(dict.values(registry.retiring), fn(retiring) { retiring.entry }),
+  )
+}
+
+fn dispatch(
+  entries: List(Entry(event)),
+  event: event,
+  delivery: Option(Waiter(SyncResult)),
+) -> Nil {
   list.each(entries, fn(entry: Entry(event)) {
     process.send(entry.ref.inbox, Deliver(event, delivery))
   })
 }
 
-fn retire(s: Registry(event), e: Entry(event), reply) {
-  process.send(e.ref.inbox, Drain(reply))
+fn retire(
+  s: Registry(event),
+  e: Entry(event),
+  reply: Option(DrainWaiter),
+) -> Registry(event) {
+  process.send(e.ref.inbox, Drain)
   Registry(
     ..s,
     active: list.filter(s.active, fn(other) { other.ref.id != e.ref.id }),
-    retiring: dict.insert(s.retiring, e.ref.id, e),
+    retiring: dict.insert(s.retiring, e.ref.id, Retiring(e, reply)),
   )
 }
 
-fn account(all: Dict(Waiter(SyncResult), Pending), key, id, died) {
+fn account(
+  all: Dict(Waiter(SyncResult), Pending),
+  key: Waiter(SyncResult),
+  id: HandlerId,
+  receipt: Receipt,
+) -> Dict(Waiter(SyncResult), Pending) {
   case dict.get(all, key) {
     Error(_) -> all
     Ok(p) ->
@@ -365,9 +416,9 @@ fn account(all: Dict(Waiter(SyncResult), Pending), key, id, died) {
         False -> all
         True -> {
           let remaining = set.delete(p.remaining, id)
-          let lost = case died {
-            True -> [id, ..p.lost]
-            False -> p.lost
+          let lost = case receipt {
+            Lost -> [id, ..p.lost]
+            Acknowledged -> p.lost
           }
           case set.size(remaining) {
             0 -> {
@@ -404,7 +455,11 @@ pub fn on_terminate(
   Handler(..handler, cleanup: cleanup)
 }
 
-fn spawn_worker(manager: Manager(event), handler: Handler(state, event), down) {
+fn spawn_worker(
+  manager: Manager(event),
+  handler: Handler(state, event),
+  down: Option(Subject(HandlerDown)),
+) -> Result(Entry(event), StartError) {
   use started <- result.map(
     actor.new(handler.initial)
     |> actor.on_message(fn(state, msg) {
@@ -424,12 +479,9 @@ fn spawn_worker(manager: Manager(event), handler: Handler(state, event), down) {
             }
           }
         }
-        Drain(reply) -> {
+        Drain -> {
           handler.cleanup(state)
-          case reply {
-            Some(r) -> respond(r, Ok(Nil))
-            None -> Nil
-          }
+          process.send(manager.subject, Drained(HandlerId(process.self())))
           actor.stop()
         }
       }
@@ -460,7 +512,12 @@ pub fn replace_handler(
   install(manager, Some(old.id), next, down)
 }
 
-fn install(manager: Manager(event), old, handler, down) {
+fn install(
+  manager: Manager(event),
+  old: Option(HandlerId),
+  handler: Handler(state, event),
+  down: Option(Subject(HandlerDown)),
+) -> Result(HandlerRef(event), AddError) {
   let reply = process.new_subject()
   let monitor = process.monitor(manager.pid)
   process.send(
