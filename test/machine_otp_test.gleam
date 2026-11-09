@@ -1,3 +1,4 @@
+import caller_fixture
 import eparch/effect as e
 import eparch/machine as m
 import eparch/machine/otp
@@ -13,6 +14,40 @@ type Command {
   Repeat
   Snapshot
   Mark(Int)
+}
+
+type TimerCommand {
+  Arm(e.TimeoutTime)
+  Fired(e.From(Int))
+}
+
+fn timer_handler(
+  input: m.Input(TimerCommand, Int),
+  _: Nil,
+  _: Nil,
+) -> m.Step(Nil, Nil, TimerCommand, Int) {
+  case input {
+    m.Call(from, Arm(delay)) ->
+      m.KeepStateAndData([e.StateTimeout(delay, Fired(from))])
+    m.Timeout(e.StateTimer, Fired(from)) ->
+      m.StopAndReply(process.Normal, [#(from, 1)])
+    _ -> m.KeepStateAndData([])
+  }
+}
+
+pub fn due_deadlines_reply_in_both_interpreters_test() {
+  let from = caller_fixture.token()
+  list.each([e.After(-5), e.After(0), e.At(-1_000_000_000_000_000)], fn(time) {
+    let pure = m.new(Nil, Nil, timer_handler)
+    let #(effects, final) = m.step(pure, m.Call(from, Arm(time)))
+    assert m.is_stopped(final)
+    assert list.contains(effects, e.Reply(from, 1))
+    let assert Ok(server) =
+      otp.builder(Nil, Nil, timer_handler, on_enter: option.None)
+      |> sm.start_link
+    let request = sm.send_request(server.ref, Arm(time))
+    assert sm.receive_response(request, 1000) == Ok(1)
+  })
 }
 
 fn handle(input, phase, trace) {

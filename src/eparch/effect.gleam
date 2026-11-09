@@ -26,6 +26,7 @@
 
 import eparch/state_machine
 import gleam/erlang/process.{type ExitReason}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
@@ -77,11 +78,20 @@ pub type TimeoutTime {
   At(monotonic_milliseconds: Int)
 }
 
+/// Negative relative delays mean immediately. Absolute monotonic readings
+/// are signed and must retain their epoch, including negative timestamps.
+pub fn normalise_time(time: TimeoutTime) -> TimeoutTime {
+  case time {
+    After(delay) -> After(int.max(0, delay))
+    At(_) -> time
+  }
+}
+
 /// The absolute deadline a `TimeoutTime` represents for the given clock
 /// reading.
 ///
 pub fn deadline_from(clock: Int, time: TimeoutTime) -> Int {
-  case time {
+  case normalise_time(time) {
     After(ms) -> clock + ms
     At(deadline) -> deadline
   }

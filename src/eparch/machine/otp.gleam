@@ -67,10 +67,17 @@ fn step(s: m.Step(p, d, a, r)) -> sm.Step(p, d, a, r) {
   }
 }
 
-fn time(t: e.TimeoutTime) {
-  case t {
+@external(erlang, "eparch_delivery_ffi", "now_ms")
+fn monotonic_milliseconds() -> Int
+
+fn time(t: e.TimeoutTime) -> sm.TimeoutTime {
+  case e.normalise_time(t) {
     e.After(n) -> sm.After(n)
-    e.At(n) -> sm.At(n)
+    e.At(deadline) ->
+      case deadline <= monotonic_milliseconds() {
+        True -> sm.After(0)
+        False -> sm.At(deadline)
+      }
   }
 }
 
