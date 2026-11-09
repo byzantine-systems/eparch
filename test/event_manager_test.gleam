@@ -24,14 +24,15 @@ type Command {
 
 // A subscriber's trace is the projection of the history onto its active
 // intervals. There is no promised order *between* different callbacks.
-fn expected(history: List(Command), slot: Int) -> List(Int) {
+fn expected(history: List(Command), slot: Int) -> List(#(Int, Int)) {
   let #(_, events) =
-    list.fold(history, #(False, []), fn(acc, command) {
+    list.index_fold(history, #(None, []), fn(acc, command, index) {
       let #(active, events) = acc
-      case command {
-        Toggle(i) if i == slot -> #(!active, events)
-        Publish(n) if active -> #(active, [n, ..events])
-        _ -> acc
+      case command, active {
+        Toggle(i), None if i == slot -> #(Some(index), events)
+        Toggle(i), Some(_) if i == slot -> #(None, events)
+        Publish(n), Some(generation) -> #(active, [#(generation, n), ..events])
+        _, _ -> acc
       }
     })
   list.reverse(events)
@@ -94,7 +95,7 @@ pub fn subscription_history_test() {
   let inboxes =
     dict.from_list(list.map(slots, fn(i) { #(i, process.new_subject()) }))
   let active =
-    list.fold(history, dict.new(), fn(active, command) {
+    list.index_fold(history, dict.new(), fn(active, command, index) {
       case command {
         Publish(n) -> {
           bus.notify(manager, n)
@@ -108,8 +109,13 @@ pub fn subscription_history_test() {
             }
             Error(Nil) -> {
               let assert Ok(inbox) = dict.get(inboxes, i)
+              let handler =
+                bus.new_handler(Nil, fn(n, _) {
+                  process.send(inbox, #(index, n))
+                  bus.Continue(Nil)
+                })
               let assert Ok(ref) =
-                bus.add_handler(manager, collector(inbox), on_down: None)
+                bus.add_handler(manager, handler, on_down: None)
               dict.insert(active, i, ref)
             }
           }

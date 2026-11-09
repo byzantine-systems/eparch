@@ -9,6 +9,7 @@ import eparch/effect
 import eparch/machine.{type Input, type Machine, type Step, EnterKeep}
 import gleam/erlang/process
 import gleam/list
+import gleam/option.{type Option}
 import qcheck
 
 fn assert_true(condition: Bool, label: String) {
@@ -136,7 +137,10 @@ type Observation {
     phase: Int,
     data: Int,
     timers: List(#(effect.TimerKind, Int, Int)),
-    stopped: Bool,
+    stopped: Option(process.ExitReason),
+    clock: Int,
+    postponed: List(Input(Int, Int)),
+    progress: machine.Progress,
   )
 }
 
@@ -145,7 +149,10 @@ fn observe(m: Machine(Int, Int, Int, Int)) -> Observation {
     phase: machine.phase(m),
     data: machine.data(m),
     timers: machine.pending_timeouts(m),
-    stopped: machine.is_stopped(m),
+    stopped: machine.stop_reason(m),
+    clock: machine.clock(m),
+    postponed: machine.postponed_inputs(m),
+    progress: machine.progress(m),
   )
 }
 
