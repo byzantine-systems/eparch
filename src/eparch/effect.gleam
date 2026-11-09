@@ -25,7 +25,6 @@
 ////
 
 import eparch/state_machine
-import gleam/erlang/process.{type ExitReason}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -99,8 +98,8 @@ pub fn deadline_from(clock: Int, time: TimeoutTime) -> Int {
 
 /// One transition effect.
 ///
-/// Constructors are public so handlers can build effect lists; the monoid
-/// operations are `append`, `concat`, and `resolve`.
+/// Handlers build ordinary lists in execution order. Use `resolve` to
+/// inspect which timer decisions survive a single transition.
 ///
 pub type Effect(msg, reply) {
   /// Reply to a synchronous caller.
@@ -199,31 +198,6 @@ pub fn decides_timer(effect: Effect(msg, reply), kind: TimerKind) -> Bool {
   decided_key(effect) == Some(kind)
 }
 
-/// The empty effect list, identity of the effect monoid.
-///
-pub fn none() -> List(Effect(msg, reply)) {
-  []
-}
-
-/// Concatenate two effect lists: the monoid append.
-///
-/// Decisions in `b` can supersede timer decisions in `a`.
-///
-pub fn append(
-  first: List(Effect(msg, reply)),
-  second: List(Effect(msg, reply)),
-) -> List(Effect(msg, reply)) {
-  list.append(first, second)
-}
-
-/// Concatenate a list of effect lists.
-///
-pub fn concat(
-  lists: List(List(Effect(msg, reply))),
-) -> List(Effect(msg, reply)) {
-  list.flatten(lists)
-}
-
 /// Normalise an effect list the way the runtime engine does.
 ///
 /// For each timer class the last decision wins: a later `StateTimeout`,
@@ -261,19 +235,4 @@ fn decided_key(effect: Effect(msg, reply)) -> Option(TimerKind) {
     | UpdateGenericTimeout(id, _) -> Some(GenericTimer(id))
     NextEvent(..) | Postpone | Hibernate | Reply(..) -> None
   }
-}
-
-/// A terminal stop decision: the reason plus any replies to send first.
-///
-/// Replies here are typed pairs, so only actual replies can
-/// be attached to a stop.
-///
-pub type StopWith(reply) {
-  StopWith(reason: ExitReason, replies: List(#(From(reply), reply)))
-}
-
-/// A stop decision with no pending replies.
-///
-pub fn stop_with(reason: ExitReason) -> StopWith(reply) {
-  StopWith(reason, [])
 }

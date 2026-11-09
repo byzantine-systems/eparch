@@ -507,7 +507,10 @@ fn apply_timers(
         update_timer(machine, effect.EventTimer, content)
       effect.UpdateGenericTimeout(id, content) ->
         update_timer(machine, effect.GenericTimer(id), content)
-      _ -> machine
+      effect.Reply(..)
+      | effect.Postpone
+      | effect.NextEvent(..)
+      | effect.Hibernate -> machine
     }
   })
 }

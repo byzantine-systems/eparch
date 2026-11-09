@@ -74,28 +74,11 @@ fn effects_gen() -> qcheck.Generator(List(Effect(Int, Int))) {
   qcheck.generic_list(effect_gen(), qcheck.bounded_int(0, 16))
 }
 
-pub fn append_empty_is_identity_left_test() {
-  use es <- qcheck.given(effects_gen())
-  assert_true(effect.append(effect.none(), es) == es, "append-empty-left")
-}
-
-pub fn append_empty_is_identity_right_test() {
-  use es <- qcheck.given(effects_gen())
-  assert_true(effect.append(es, effect.none()) == es, "append-empty-right")
-}
-
-pub fn append_is_associative_test() {
-  use triple <- qcheck.given(qcheck.tuple3(
-    effects_gen(),
-    effects_gen(),
-    effects_gen(),
-  ))
-  let #(a, b, c) = triple
-  assert_true(
-    effect.append(effect.append(a, b), c)
-      == effect.append(a, effect.append(b, c)),
-    "append-associative",
-  )
+pub fn resolution_preserves_the_order_and_multiplicity_of_non_timer_effects_test() {
+  use effects <- qcheck.given(effects_gen())
+  let non_timer = fn(e) { class_of(e) == "other" }
+  assert list.filter(effect.resolve(effects), non_timer)
+    == list.filter(effects, non_timer)
 }
 
 pub fn resolve_is_idempotent_test() {
@@ -110,8 +93,8 @@ pub fn resolve_composes_over_append_test() {
   use pair <- qcheck.given(qcheck.tuple2(effects_gen(), effects_gen()))
   let #(a, b) = pair
   assert_true(
-    effect.resolve(effect.append(a, b))
-      == effect.resolve(effect.append(effect.resolve(a), effect.resolve(b))),
+    effect.resolve(list.append(a, b))
+      == effect.resolve(list.append(effect.resolve(a), effect.resolve(b))),
     "resolve-composition",
   )
 }
