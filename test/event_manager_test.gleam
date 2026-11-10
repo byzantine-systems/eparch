@@ -7,6 +7,43 @@ import qcheck
 
 const wait = 1000
 
+@external(erlang, "eparch_test_helpers", "while_suspended")
+fn while_suspended(pid: process.Pid, run: fn() -> a) -> a
+
+pub fn a_deadline_spent_in_the_manager_mailbox_cannot_occupy_a_slot_test() {
+  let assert Ok(manager) =
+    bus.new_start_options() |> bus.with_max_in_flight_sync(1) |> bus.start_link
+  let entered = process.new_subject()
+  let processed = process.new_subject()
+  let handler =
+    bus.new_handler(Nil, fn(event, _) {
+      case event {
+        1 -> {
+          let gate = process.new_subject()
+          process.send(entered, gate)
+          take(gate)
+        }
+        _ -> Nil
+      }
+      process.send(processed, event)
+      bus.Continue(Nil)
+    })
+  let assert Ok(ref) = bus.add_handler(manager, handler, on_down: None)
+  assert while_suspended(bus.manager_pid(manager), fn() {
+      bus.sync_notify(manager, 1, 100)
+    })
+    == bus.SyncTimeout
+  let gate = take(entered)
+  // The worker is still blocked, but the first caller's slot has expired.
+  // The second publication is admitted, then its own caller also times out.
+  let outcome = bus.sync_notify(manager, 2, 10)
+  process.send(gate, Nil)
+  assert bus.remove_handler(manager, ref, wait) == Ok(Nil)
+  assert bus.stop(manager, wait) == Ok(Nil)
+  assert outcome == bus.SyncTimeout
+  assert received(processed) == [1, 2]
+}
+
 fn start() {
   let assert Ok(manager) = bus.start_link(bus.new_start_options())
   manager

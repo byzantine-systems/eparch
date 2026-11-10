@@ -7,10 +7,22 @@ own type system (e.g. the raw `{global, Name}` tuple consumed by
 """.
 
 -export([
+    while_suspended/2,
     encode_global_target/1,
     encode_atom_as_term/1,
     encode_ping/1
 ]).
+
+%% Use OTP's acknowledged suspension rather than guessing when a manager
+%% has stopped dequeueing. Always resume, even if the assertion fails.
+-spec while_suspended(pid(), fun(() -> A)) -> A.
+while_suspended(Pid, Run) ->
+    ok = sys:suspend(Pid),
+    try
+        Run()
+    after
+        sys:resume(Pid)
+    end.
 
 -doc "Build the `{global, Name}` server-ref tuple consumed by `gen_statem`.".
 encode_global_target(Name) -> {global, Name}.
