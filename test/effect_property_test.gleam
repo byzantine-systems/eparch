@@ -83,20 +83,16 @@ pub fn resolution_preserves_the_order_and_multiplicity_of_non_timer_effects_test
 
 pub fn resolve_is_idempotent_test() {
   use es <- qcheck.given(effects_gen())
-  assert_true(
-    effect.resolve(effect.resolve(es)) == effect.resolve(es),
-    "resolve-idempotent",
-  )
+  assert effect.resolve(effect.resolve(es)) == effect.resolve(es)
+    as "resolve-idempotent"
 }
 
 pub fn resolve_composes_over_append_test() {
   use pair <- qcheck.given(qcheck.tuple2(effects_gen(), effects_gen()))
   let #(a, b) = pair
-  assert_true(
-    effect.resolve(list.append(a, b))
-      == effect.resolve(list.append(effect.resolve(a), effect.resolve(b))),
-    "resolve-composition",
-  )
+  assert effect.resolve(list.append(a, b))
+    == effect.resolve(list.append(effect.resolve(a), effect.resolve(b)))
+    as "resolve-composition"
 }
 
 /// After resolution at most one decision per timer class survives, in the
@@ -105,10 +101,8 @@ pub fn resolve_composes_over_append_test() {
 pub fn resolve_keeps_one_decision_per_timer_class_test() {
   use es <- qcheck.given(effects_gen())
   let resolved = effect.resolve(es)
-  assert_true(
-    deciding_classes(resolved) == dedupe(deciding_classes(resolved)),
-    "resolve-one-per-class",
-  )
+  assert deciding_classes(resolved) == dedupe(deciding_classes(resolved))
+    as "resolve-one-per-class"
 }
 
 /// The surviving decision per class is the last one from the input list.
@@ -116,12 +110,10 @@ pub fn resolve_keeps_one_decision_per_timer_class_test() {
 pub fn resolve_keeps_the_last_decision_per_class_test() {
   use es <- qcheck.given(effects_gen())
   let resolved = effect.resolve(es)
-  assert_true(
-    list.all(class_keys(es), fn(key) {
-      last_effect_of_class(es, key) == first_effect_of_class(resolved, key)
-    }),
-    "resolve-last-wins",
-  )
+  assert list.all(class_keys(es), fn(key) {
+    last_effect_of_class(es, key) == first_effect_of_class(resolved, key)
+  })
+    as "resolve-last-wins"
 }
 
 // --- helpers ------------------------------------------------------------
@@ -169,7 +161,7 @@ fn class_of(e: Effect(Int, Int)) -> String {
     effect.GenericTimeout(id, ..)
     | effect.CancelGenericTimeout(id)
     | effect.UpdateGenericTimeout(id, _) ->
-      "generic:" <> effect.timer_id_name(id)
+      "generic:" <> effect.timer_id_to_string(id)
     _ -> "other"
   }
 }
@@ -181,11 +173,4 @@ fn dedupe(keys: List(String)) -> List(String) {
       False -> list.append(seen, [key])
     }
   })
-}
-
-fn assert_true(condition: Bool, label: String) {
-  case condition {
-    True -> Nil
-    False -> panic as { "law violated: " <> label }
-  }
 }

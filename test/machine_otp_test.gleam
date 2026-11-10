@@ -43,7 +43,12 @@ pub fn due_deadlines_reply_in_both_interpreters_test() {
     assert m.is_stopped(final)
     assert list.contains(effects, e.Reply(from, 1))
     let assert Ok(server) =
-      otp.builder(Nil, Nil, timer_handler, on_enter: option.None)
+      otp.builder(
+        phase: Nil,
+        data: Nil,
+        handler: timer_handler,
+        on_enter: option.None,
+      )
       |> sm.start_link
     let request = sm.send_request(server.ref, Arm(time))
     assert sm.receive_response(request, 1000) == Ok(1)
@@ -82,7 +87,8 @@ pub fn otp_and_logical_machine_deliver_the_same_trace_test() {
     qcheck.bounded_int(0, 18),
   ))
   let assert Ok(server) =
-    otp.builder(False, [], handle, on_enter: Some(enter)) |> sm.start_link
+    otp.builder(phase: False, data: [], handler: handle, on_enter: Some(enter))
+    |> sm.start_link
   let #(_, model) =
     m.new(False, [], handle) |> m.with_state_enter(enter) |> m.begin
   let model =

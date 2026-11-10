@@ -123,10 +123,24 @@ pub opaque type Machine(state, data, msg, reply) {
     timers: List(ArmedTimer(msg)),
     postponed: List(Input(msg, reply)),
     queue: List(Queued(msg, reply)),
-    stopped: Option(ExitReason),
+    lifecycle: Lifecycle,
     next_armed_at: Int,
-    initialised: Bool,
   )
+}
+
+/// Where a machine is in its life. A fresh machine has not run its initial
+/// entry yet; a stopped one ignores every further drive. Folding both facts
+/// into one type rules out a stopped machine that never started.
+type Lifecycle {
+  Fresh
+  Running
+  Stopped(reason: ExitReason)
+}
+
+/// Whether a keep-like step re-fires the enter callback.
+type Reentry {
+  Repeat
+  Keep
 }
 
 const delivery_fuel = 65_536
@@ -151,9 +165,8 @@ pub fn new(
     timers: [],
     postponed: [],
     queue: [],
-    stopped: None,
+    lifecycle: Fresh,
     next_armed_at: 0,
-    initialised: False,
   )
 }
 
@@ -175,20 +188,20 @@ pub fn with_state_enter(
 pub fn begin(
   machine: Machine(state, data, msg, reply),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.initialised {
-    True -> #([], machine)
-    False -> resume(machine, delivery_fuel)
+  case machine.lifecycle {
+    Fresh -> resume(machine, delivery_fuel)
+    Running | Stopped(_) -> #([], machine)
   }
 }
 
 fn initialise(
   machine: Machine(state, data, msg, reply),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.initialised {
-    True -> #([], machine)
-    False -> {
+  case machine.lifecycle {
+    Running | Stopped(_) -> #([], machine)
+    Fresh -> {
       let #(effects, entered) =
-        fire_enter(Machine(..machine, initialised: True), machine.phase)
+        fire_enter(Machine(..machine, lifecycle: Running), machine.phase)
       #(effects, apply_timers(entered, effects))
     }
   }
@@ -214,9 +227,9 @@ pub fn step_with_budget(
   input: Input(msg, reply),
   budget: Int,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.stopped {
-    Some(_) -> #([], machine)
-    None -> {
+  case machine.lifecycle {
+    Stopped(_) -> #([], machine)
+    Fresh | Running -> {
       let #(entry, machine) = initialise(machine)
       settle(enqueue_newest(machine, input, None), budget, entry)
     }
@@ -230,9 +243,9 @@ pub type Progress {
 
 /// Whether there is runnable work left at the current logical instant.
 pub fn progress(machine: Machine(state, data, msg, reply)) -> Progress {
-  case machine.queue, machine.stopped {
-    [_, ..], None -> NeedsResume
-    _, _ -> Settled
+  case machine.queue, machine.lifecycle {
+    [_, ..], Fresh | [_, ..], Running -> NeedsResume
+    [], _ | _, Stopped(_) -> Settled
   }
 }
 
@@ -256,9 +269,9 @@ pub fn advance_time(
   milliseconds: Int,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
   let #(entry, machine) = begin(machine)
-  case machine.stopped {
-    Some(_) -> #(entry, machine)
-    None -> {
+  case machine.lifecycle {
+    Stopped(_) -> #(entry, machine)
+    Fresh | Running -> {
       let machine =
         Machine(..machine, clock: machine.clock + int.max(0, milliseconds))
       let machine = enqueue_due(machine)
@@ -314,9 +327,12 @@ fn settle_loop(
   fuel: Int,
   reversed: List(Effect(msg, reply)),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.queue, machine.stopped, fuel <= 0 {
-    [], _, _ | _, Some(_), _ | _, _, True -> #(list.reverse(reversed), machine)
-    [first, ..rest], None, False -> {
+  case machine.queue, machine.lifecycle, fuel <= 0 {
+    [], _, _ | _, Stopped(_), _ | _, _, True -> #(
+      list.reverse(reversed),
+      machine,
+    )
+    [first, ..rest], Fresh, False | [first, ..rest], Running, False -> {
       let machine = Machine(..machine, queue: rest)
       let #(effects, machine) = process(machine, first.input)
       settle_loop(
@@ -332,9 +348,9 @@ fn process(
   machine: Machine(state, data, msg, reply),
   input: Input(msg, reply),
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.stopped {
-    Some(_) -> #([], machine)
-    None -> {
+  case machine.lifecycle {
+    Stopped(_) -> #([], machine)
+    Fresh | Running -> {
       let machine = cancel_timer(machine, effect.EventTimer)
       let step_result = machine.handler(input, machine.phase, machine.data)
       transition(machine, input, step_result)
@@ -378,17 +394,18 @@ fn transition(
       #(effects, apply_timers(machine, effects))
     }
 
-    KeepState(data, effects) -> keep_like(machine, input, effects, data, False)
+    KeepState(data, effects) -> keep_like(machine, input, effects, data, Keep)
     KeepStateAndData(effects) ->
-      keep_like(machine, input, effects, machine.data, False)
-    RepeatState(data, effects) -> keep_like(machine, input, effects, data, True)
+      keep_like(machine, input, effects, machine.data, Keep)
+    RepeatState(data, effects) ->
+      keep_like(machine, input, effects, data, Repeat)
     RepeatStateAndData(effects) ->
-      keep_like(machine, input, effects, machine.data, True)
+      keep_like(machine, input, effects, machine.data, Repeat)
 
-    Stop(reason) -> #([], Machine(..machine, stopped: Some(reason)))
+    Stop(reason) -> #([], Machine(..machine, lifecycle: Stopped(reason)))
 
     StopAndReply(reason, replies) -> {
-      let machine = Machine(..machine, stopped: Some(reason))
+      let machine = Machine(..machine, lifecycle: Stopped(reason))
       let effects =
         list.map(replies, fn(pair) {
           let #(to, response) = pair
@@ -404,13 +421,13 @@ fn keep_like(
   input: Input(msg, reply),
   effects: List(Effect(msg, reply)),
   data: data,
-  repeat: Bool,
+  reentry: Reentry,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
   let effects = effect.resolve(effects)
   let machine = Machine(..machine, data: data)
-  let #(enter_effects, machine) = case repeat {
-    True -> fire_enter(machine, machine.phase)
-    False -> #([], machine)
+  let #(enter_effects, machine) = case reentry {
+    Repeat -> fire_enter(machine, machine.phase)
+    Keep -> #([], machine)
   }
   let machine = postpone_current(machine, input, effects)
   let machine = insert_next_events(machine, effects)
@@ -422,8 +439,8 @@ fn fire_enter(
   machine: Machine(state, data, msg, reply),
   old: state,
 ) -> #(List(Effect(msg, reply)), Machine(state, data, msg, reply)) {
-  case machine.on_enter, machine.stopped {
-    Some(enter), None -> {
+  case machine.on_enter, machine.lifecycle {
+    Some(enter), Fresh | Some(enter), Running -> {
       let enter_step = enter(old, machine.data)
       let #(data, effects) = case enter_step {
         EnterKeep(data, effects) -> #(data, effects)
@@ -433,7 +450,7 @@ fn fire_enter(
       let effects = effect.resolve(list.map(effects, effect.from_entry))
       #(effects, machine)
     }
-    _, _ -> #([], machine)
+    None, _ | _, Stopped(_) -> #([], machine)
   }
 }
 
@@ -469,12 +486,23 @@ fn insert_next_events(
             effect.InfoEvent -> Info(content)
             effect.CallEvent(from) -> Call(from, content)
           })
-        _ -> Error(Nil)
+        effect.Reply(..)
+        | effect.Postpone
+        | effect.StateTimeout(..)
+        | effect.EventTimeout(..)
+        | effect.GenericTimeout(..)
+        | effect.CancelStateTimeout
+        | effect.CancelEventTimeout
+        | effect.CancelGenericTimeout(..)
+        | effect.UpdateStateTimeout(..)
+        | effect.UpdateEventTimeout(..)
+        | effect.UpdateGenericTimeout(..)
+        | effect.Hibernate -> Error(Nil)
       }
     })
   case inserted {
     [] -> machine
-    _ ->
+    [_, ..] ->
       Machine(
         ..machine,
         queue: list.append(
@@ -538,7 +566,10 @@ fn arm_timer(
     True ->
       case kind, machine.queue {
         effect.EventTimer, [_, ..] -> machine
-        _, _ -> enqueue_newest(machine, Timeout(kind, content), Some(kind))
+        effect.EventTimer, []
+        | effect.StateTimer, _
+        | effect.GenericTimer(_), _
+        -> enqueue_newest(machine, Timeout(kind, content), Some(kind))
       }
     False -> {
       let timer =
@@ -628,7 +659,10 @@ pub fn clock(machine: Machine(state, data, msg, reply)) -> Int {
 /// Whether the machine has stopped.
 ///
 pub fn is_stopped(machine: Machine(state, data, msg, reply)) -> Bool {
-  machine.stopped != None
+  case machine.lifecycle {
+    Stopped(_) -> True
+    Fresh | Running -> False
+  }
 }
 
 /// Why the machine stopped, if it has.
@@ -636,7 +670,10 @@ pub fn is_stopped(machine: Machine(state, data, msg, reply)) -> Bool {
 pub fn stop_reason(
   machine: Machine(state, data, msg, reply),
 ) -> Option(ExitReason) {
-  machine.stopped
+  case machine.lifecycle {
+    Stopped(reason) -> Some(reason)
+    Fresh | Running -> None
+  }
 }
 
 /// The timers currently armed: kind, remaining milliseconds, and payload.

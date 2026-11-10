@@ -12,13 +12,6 @@ import gleam/list
 import gleam/option.{type Option}
 import qcheck
 
-fn assert_true(condition: Bool, label: String) {
-  case condition {
-    True -> Nil
-    False -> panic as { "law violated: " <> label }
-  }
-}
-
 pub fn resuming_preserves_the_ordered_effect_trace_test() {
   use depth <- qcheck.given(qcheck.bounded_int(2, 30))
   let chain =
@@ -160,8 +153,8 @@ pub fn determinism_test() {
   use commands <- qcheck.given(commands_gen())
   let #(effects_a, a) = run(workhorse(), commands)
   let #(effects_b, b) = run(workhorse(), commands)
-  assert_true(effects_a == effects_b, "determinism-effects")
-  assert_true(observe(a) == observe(b), "determinism-observations")
+  assert effects_a == effects_b as "determinism-effects"
+  assert observe(a) == observe(b) as "determinism-observations"
 }
 
 pub fn trace_composition_test() {
@@ -177,11 +170,9 @@ pub fn trace_composition_test() {
   let #(whole_effects, whole) = run(workhorse(), commands)
   let #(first_effects, middle) = run(workhorse(), prefix)
   let #(second_effects, rest) = run(middle, suffix)
-  assert_true(
-    whole_effects == list.append(first_effects, second_effects),
-    "composition-effects",
-  )
-  assert_true(observe(whole) == observe(rest), "composition-residual")
+  assert whole_effects == list.append(first_effects, second_effects)
+    as "composition-effects"
+  assert observe(whole) == observe(rest) as "composition-residual"
 }
 
 pub fn stopped_machine_ignores_everything_test() {
@@ -189,11 +180,11 @@ pub fn stopped_machine_ignores_everything_test() {
   let #(before, after) = pair
   let commands = list.flatten([before, [Deliver(machine.Cast(-1))], after])
   let #(_, stopped) = run(workhorse(), commands)
-  assert_true(machine.is_stopped(stopped), "stopped-machine-stopped")
+  assert machine.is_stopped(stopped) as "stopped-machine-stopped"
   let #(effects, continued) =
     run(stopped, [Deliver(machine.Cast(1)), Wait(100)])
-  assert_true(effects == [], "stopped-machine-no-effects")
-  assert_true(observe(continued) == observe(stopped), "stopped-machine-frozen")
+  assert effects == [] as "stopped-machine-no-effects"
+  assert observe(continued) == observe(stopped) as "stopped-machine-frozen"
 }
 
 // ---------------------------------------------------------------------------
@@ -249,16 +240,11 @@ pub fn postponed_inputs_redeliver_in_fifo_order_test() {
       m
     })
   let queued = list.map(ns, fn(n) { machine.Cast(RGo(n)) })
-  assert_true(
-    machine.postponed_inputs(m) == queued,
-    "postpone-fifo-while-queued",
-  )
+  assert machine.postponed_inputs(m) == queued as "postpone-fifo-while-queued"
   let #(_, open) = machine.step(m, machine.Cast(RTrigger))
-  assert_true(
-    machine.data(open) == list.map(ns, RSeenGo),
-    "postpone-fifo-after-redelivery",
-  )
-  assert_true(machine.postponed_inputs(open) == [], "postpone-fifo-drained")
+  assert machine.data(open) == list.map(ns, RSeenGo)
+    as "postpone-fifo-after-redelivery"
+  assert machine.postponed_inputs(open) == [] as "postpone-fifo-drained"
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +314,7 @@ pub fn state_timer_cancelled_by_state_change_test() {
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArm(ms)))
   let #(_, m) = machine.step(m, machine.Cast(TSwitch))
   let #(_, m) = machine.advance_time(m, ms + 1000)
-  assert_true(machine.data(m) == [], "state-timer-cancelled")
+  assert machine.data(m) == [] as "state-timer-cancelled"
 }
 
 pub fn state_timer_fires_exactly_once_without_change_test() {
@@ -336,7 +322,7 @@ pub fn state_timer_fires_exactly_once_without_change_test() {
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArm(ms)))
   let #(_, m) = machine.advance_time(m, ms)
   let #(_, m) = machine.advance_time(m, ms * 10)
-  assert_true(machine.data(m) == [FiredState], "state-timer-fires-once")
+  assert machine.data(m) == [FiredState] as "state-timer-fires-once"
 }
 
 pub fn event_timer_cancelled_by_any_input_test() {
@@ -344,14 +330,14 @@ pub fn event_timer_cancelled_by_any_input_test() {
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArmEvent(ms)))
   let #(_, m) = machine.step(m, machine.Cast(TTap))
   let #(_, m) = machine.advance_time(m, ms * 2)
-  assert_true(machine.data(m) == [], "event-timer-cancelled")
+  assert machine.data(m) == [] as "event-timer-cancelled"
 }
 
 pub fn event_timer_fires_when_no_input_intervenes_test() {
   use ms <- qcheck.given(qcheck.bounded_int(2, 100))
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArmEvent(ms)))
   let #(_, m) = machine.advance_time(m, ms)
-  assert_true(machine.data(m) == [FiredEvent], "event-timer-fires")
+  assert machine.data(m) == [FiredEvent] as "event-timer-fires"
 }
 
 pub fn generic_timer_survives_state_change_test() {
@@ -359,16 +345,16 @@ pub fn generic_timer_survives_state_change_test() {
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArmGeneric(ms)))
   let #(_, m) = machine.step(m, machine.Cast(TSwitch))
   let #(_, m) = machine.advance_time(m, ms + 10)
-  assert_true(machine.data(m) == [FiredGeneric], "generic-timer-survives")
+  assert machine.data(m) == [FiredGeneric] as "generic-timer-survives"
 }
 
 pub fn rearming_replaces_within_one_transition_test() {
   use ms <- qcheck.given(qcheck.bounded_int(1, 30))
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TRearm(ms)))
   let #(_, before) = machine.advance_time(m, ms * 3)
-  assert_true(machine.data(before) == [], "rearm-earlier-ignored")
+  assert machine.data(before) == [] as "rearm-earlier-ignored"
   let #(_, after) = machine.advance_time(before, 1)
-  assert_true(machine.data(after) == [FiredState], "rearm-later-wins")
+  assert machine.data(after) == [FiredState] as "rearm-later-wins"
 }
 
 // ---------------------------------------------------------------------------
@@ -456,16 +442,14 @@ pub fn enter_fires_iff_begin_change_or_repeat_test() {
     qcheck.bounded_int(0, 14),
   ))
   let #(begin_effects, m) = machine.begin(enter_fixture())
-  assert_true(begin_effects == [], "enter-begin-no-effects")
+  assert begin_effects == [] as "enter-begin-no-effects"
   let m =
     list.fold(ops, m, fn(m, op) {
       let #(_, m) = machine.step(m, machine.Cast(op))
       m
     })
-  assert_true(
-    machine.data(m) == list.append([0], expected_enters(ops)),
-    "enter-fires-iff",
-  )
+  assert machine.data(m) == list.append([0], expected_enters(ops))
+    as "enter-fires-iff"
 }
 
 fn op_gen() -> qcheck.Generator(EOp) {
@@ -485,14 +469,14 @@ fn op_gen() -> qcheck.Generator(EOp) {
 pub fn zero_delay_state_timer_fires_immediately_test() {
   let #(_, m) = machine.step(timer_fixture(), machine.Cast(TArm(0)))
   let #(_, m) = machine.advance_time(m, 0)
-  assert_true(machine.data(m) == [FiredState], "zero-delay-fires")
+  assert machine.data(m) == [FiredState] as "zero-delay-fires"
 }
 
 pub fn update_without_running_timer_fires_immediately_test() {
   let m = timer_fixture()
   let #(_, m) = machine.step(m, machine.Cast(TTouch))
   let #(_, m) = machine.advance_time(m, 0)
-  assert_true(machine.data(m) == [FiredState], "update-not-running-fires")
+  assert machine.data(m) == [FiredState] as "update-not-running-fires"
 }
 
 // ---------------------------------------------------------------------------

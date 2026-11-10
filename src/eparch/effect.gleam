@@ -61,7 +61,14 @@ pub fn timer_id(name: String) -> TimerId {
 
 /// The string key underlying a `TimerId`, for display and interop.
 ///
-pub fn timer_id_name(id: TimerId) -> String {
+/// ## Example
+///
+/// ```gleam
+/// effect.timer_id("heartbeat") |> effect.timer_id_to_string
+/// // -> "heartbeat"
+/// ```
+///
+pub fn timer_id_to_string(id: TimerId) -> String {
   let TimerId(name) = id
   name
 }
@@ -79,6 +86,7 @@ pub type TimeoutTime {
 
 /// Negative relative delays mean immediately. Absolute monotonic readings
 /// are signed and must retain their epoch, including negative timestamps.
+@internal
 pub fn normalise_time(time: TimeoutTime) -> TimeoutTime {
   case time {
     After(delay) -> After(int.max(0, delay))
@@ -89,6 +97,7 @@ pub fn normalise_time(time: TimeoutTime) -> TimeoutTime {
 /// The absolute deadline a `TimeoutTime` represents for the given clock
 /// reading.
 ///
+@internal
 pub fn deadline_from(clock: Int, time: TimeoutTime) -> Int {
   case normalise_time(time) {
     After(ms) -> clock + ms
@@ -176,6 +185,9 @@ pub type EntryEffect(msg, reply) {
   EntryHibernate
 }
 
+/// Embed an entry-safe effect into the full effect vocabulary. Every timer
+/// decision keeps its timer class.
+@internal
 pub fn from_entry(entry: EntryEffect(msg, reply)) -> Effect(msg, reply) {
   case entry {
     EntryReply(to, response) -> Reply(to, response)
@@ -194,6 +206,7 @@ pub fn from_entry(entry: EntryEffect(msg, reply)) -> Effect(msg, reply) {
 
 /// Does this effect decide the fate of the given timer class?
 ///
+@internal
 pub fn decides_timer(effect: Effect(msg, reply), kind: TimerKind) -> Bool {
   decided_key(effect) == Some(kind)
 }
