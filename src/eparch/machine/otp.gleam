@@ -28,15 +28,10 @@ pub fn builder(
         None -> sm.KeepStateAndData([])
         Some(enter) ->
           case enter(old, data) {
-            m.EnterKeep(data, es) ->
-              sm.KeepState(
-                data,
-                list.map(es, fn(x) { action(e.from_entry(x)) }),
-              )
-            m.EnterKeepData(es) ->
-              sm.KeepStateAndData(
-                list.map(es, fn(x) { action(e.from_entry(x)) }),
-              )
+            m.EnterKeep(data, effects) ->
+              sm.KeepState(data, list.map(effects, entry_action))
+            m.EnterKeepData(effects) ->
+              sm.KeepStateAndData(list.map(effects, entry_action))
           }
       }
     sm.RawInfo(_) -> sm.KeepStateAndData([])
@@ -55,13 +50,19 @@ pub fn builder(
   }
 }
 
-fn step(s: m.Step(p, d, a, r)) -> sm.Step(p, d, a, r) {
-  case s {
-    m.NextState(p, d, es) -> sm.NextState(p, d, list.map(es, action))
-    m.KeepState(d, es) -> sm.KeepState(d, list.map(es, action))
-    m.KeepStateAndData(es) -> sm.KeepStateAndData(list.map(es, action))
-    m.RepeatState(d, es) -> sm.RepeatState(d, list.map(es, action))
-    m.RepeatStateAndData(es) -> sm.RepeatStateAndData(list.map(es, action))
+fn step(
+  transition: m.Step(phase, data, message, reply),
+) -> sm.Step(phase, data, message, reply) {
+  case transition {
+    m.NextState(phase, data, effects) ->
+      sm.NextState(phase, data, list.map(effects, action))
+    m.KeepState(data, effects) -> sm.KeepState(data, list.map(effects, action))
+    m.KeepStateAndData(effects) ->
+      sm.KeepStateAndData(list.map(effects, action))
+    m.RepeatState(data, effects) ->
+      sm.RepeatState(data, list.map(effects, action))
+    m.RepeatStateAndData(effects) ->
+      sm.RepeatStateAndData(list.map(effects, action))
     m.Stop(reason) -> sm.Stop(reason)
     m.StopAndReply(reason, replies) -> sm.StopAndReply(reason, replies)
   }
@@ -81,8 +82,14 @@ fn time(t: e.TimeoutTime) -> sm.TimeoutTime {
   }
 }
 
-fn action(x: e.Effect(msg, reply)) -> sm.Action(msg, reply) {
-  case x {
+fn entry_action(
+  effect: e.EntryEffect(message, reply),
+) -> sm.Action(message, reply) {
+  action(e.from_entry(effect))
+}
+
+fn action(effect: e.Effect(msg, reply)) -> sm.Action(msg, reply) {
+  case effect {
     e.Reply(to, v) -> sm.Reply(to, v)
     e.Postpone -> sm.Postpone
     e.NextEvent(kind, v) ->
