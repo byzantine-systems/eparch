@@ -57,7 +57,12 @@ pub fn add_terminal_logger(
   event_manager.add_handler(manager, handler, on_down: None)
 }
 
-/// Add a file logger that appends every event to `path`.
+pub type WriteFailure {
+  WriteFailure(path: String, message: String, cause: simplifile.FileError)
+}
+
+/// Add a file logger that attempts to append every event to `path`.
+/// A confirmation means the attempt finished; failures go to `on_error`.
 ///
 /// State is the destination path. The file is opened (and the line
 /// flushed) on every event via `simplifile.append`, mirroring the
@@ -66,11 +71,15 @@ pub fn add_terminal_logger(
 pub fn add_file_logger(
   manager: event_manager.Manager(ErrorEvent),
   path: String,
+  on_error on_error: fn(WriteFailure) -> Nil,
 ) -> Result(event_manager.HandlerRef(ErrorEvent), event_manager.AddError) {
   let handler =
     event_manager.new_handler(path, fn(event, path) {
       let Reported(message) = event
-      let _ = simplifile.append(to: path, contents: format(message))
+      case simplifile.append(to: path, contents: format(message)) {
+        Ok(Nil) -> Nil
+        Error(cause) -> on_error(WriteFailure(path, message, cause))
+      }
       event_manager.Continue(path)
     })
 

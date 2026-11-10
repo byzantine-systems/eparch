@@ -122,7 +122,10 @@ pub fn file_logger_appends_each_event_to_file_test() {
 
   let path = "/tmp/eparch_terminal_logger_file_appends_test.log"
   let _ = simplifile.delete(path)
-  let assert Ok(_ref) = terminal_logger.add_file_logger(manager, path)
+  let assert Ok(_ref) =
+    terminal_logger.add_file_logger(manager, path, on_error: fn(_) {
+      panic as "unexpected write failure"
+    })
 
   // Use sync_notify so we know the file has been written before reading.
   assert event_manager.sync_notify(manager, Reported("alpha"), 1000)
@@ -148,4 +151,20 @@ pub fn terminal_logger_registers_with_manager_test() {
   assert list.length(handlers) == 1
 
   terminal_logger.stop(manager)
+}
+
+pub fn completed_callback_reports_failed_file_write_test() {
+  let assert Ok(manager) = terminal_logger.start()
+  let failures = process.new_subject()
+  let path = "missing-eparch-test-directory/events.log"
+  let assert Ok(_) =
+    terminal_logger.add_file_logger(manager, path, on_error: process.send(
+      failures,
+      _,
+    ))
+  assert event_manager.sync_notify(manager, Reported("hello"), 1000)
+    == event_manager.Confirmed
+  assert process.receive(failures, 1000)
+    == Ok(terminal_logger.WriteFailure(path, "hello", simplifile.Enoent))
+  assert terminal_logger.stop(manager) == Ok(Nil)
 }
