@@ -1,8 +1,7 @@
-//// Shared option types for eparch behaviour modules (`state_machine` and
-//// `event_manager`). These mirror the OTP start-option surface common to
-//// `gen_statem`, `gen_event`, and `gen_server`: timeouts, debug flags, and
-//// the subset of `erlang:spawn_opt/2` options that make sense for a
-//// long-running server process.
+//// Start-option types for `eparch/state_machine`. These mirror the OTP
+//// start-option surface of `gen_statem`: timeouts, debug flags, and the
+//// subset of `erlang:spawn_opt/2` options that make sense for a long-running
+//// server process. `event_manager` has its own `StartOptions`.
 
 /// A timeout: either a fixed number of milliseconds or `Infinity`.
 pub type Timeout {

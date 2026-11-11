@@ -1,5 +1,6 @@
 import eparch/event_manager as bus
 import gleam/dict
+import gleam/erlang/atom
 import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/option.{None, Some}
@@ -9,6 +10,9 @@ const wait = 1000
 
 @external(erlang, "eparch_test_helpers", "while_suspended")
 fn while_suspended(pid: process.Pid, run: fn() -> a) -> a
+
+@external(erlang, "eparch_test_helpers", "exit_self")
+fn exit_self(reason: atom.Atom) -> a
 
 pub fn a_deadline_spent_in_the_manager_mailbox_cannot_occupy_a_slot_test() {
   let assert Ok(manager) =
@@ -325,5 +329,37 @@ pub fn reentrant_barrier_rejects_before_dispatch_test() {
   assert bus.sync_notify(manager, 0, wait) == bus.Confirmed
   assert bus.remove_handler(manager, ref, wait) == Ok(Nil)
   assert bus.stop(manager, wait) == Ok(Nil)
-  assert received(results) == [bus.SyncBusy]
+  assert received(results) == [bus.SyncReentrant]
+}
+
+pub fn a_dead_manager_is_reported_as_down_not_as_a_timeout_test() {
+  let assert Ok(manager) = bus.start(bus.new_start_options())
+  let assert Ok(ref) =
+    bus.add_handler(manager, collector(process.new_subject()), on_down: None)
+  process.kill(bus.manager_pid(manager))
+  assert bus.sync_notify(manager, 1, wait) == bus.SyncManagerDown
+  assert bus.remove_handler(manager, ref, wait) == Error(bus.RemoveManagerDown)
+  let assert Error(bus.AddManagerDown) =
+    bus.add_handler(manager, collector(process.new_subject()), on_down: None)
+  assert bus.stop(manager, wait) == Error(bus.AlreadyStopped)
+}
+
+pub fn a_manager_mirrors_a_shutdown_exit_from_its_parent_test() {
+  let started = process.new_subject()
+  let _ =
+    process.spawn_unlinked(fn() {
+      let assert Ok(manager) = bus.start_link(bus.new_start_options())
+      let go = process.new_subject()
+      process.send(started, #(bus.manager_pid(manager), go))
+      let _ = process.receive(go, wait)
+      exit_self(atom.create("shutdown"))
+    })
+  let #(manager_pid, go) = take(started)
+  let monitor = process.monitor(manager_pid)
+  process.send(go, Nil)
+  let assert Ok(process.ProcessDown(reason: reason, ..)) =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(down) { down })
+    |> process.selector_receive(wait)
+  assert reason == process.Abnormal(atom.to_dynamic(atom.create("shutdown")))
 }

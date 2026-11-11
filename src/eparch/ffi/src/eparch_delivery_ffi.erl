@@ -1,6 +1,6 @@
 -module(eparch_delivery_ffi).
 -moduledoc "Native mailbox operations for the event manager.".
--export([notify_observer/2, request/3, respond/2, now_ms/0]).
+-export([notify_observer/2, request/3, respond/2, now_ms/0, exit_with/1]).
 
 -spec now_ms() -> integer().
 now_ms() -> erlang:monotonic_time(millisecond).
@@ -46,3 +46,11 @@ notify_observer({named_subject, Name}, Event) ->
 notify_observer({subject, Pid, Tag}, Event) ->
     Pid ! {Tag, Event},
     nil.
+
+%% Terminate the calling process with the Erlang term a Gleam
+%% `process.ExitReason` denotes. A linked manager uses this to mirror its
+%% parent's exit reason, so a supervisor sees `shutdown` and not `normal`.
+-spec exit_with(normal | killed | {abnormal, term()}) -> no_return().
+exit_with(normal) -> exit(normal);
+exit_with(killed) -> exit(killed);
+exit_with({abnormal, Reason}) -> exit(Reason).
