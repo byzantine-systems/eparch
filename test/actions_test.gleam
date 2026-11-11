@@ -174,7 +174,7 @@ pub fn next_event_preserves_event_types_and_order_test() {
   assert process.receive(reply_sub, 1000) == Ok("internal")
   assert process.receive(reply_sub, 1000) == Ok("cast")
   assert process.receive(reply_sub, 1000) == Ok("info")
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 @external(erlang, "erlang", "send")
@@ -197,7 +197,7 @@ pub fn untagged_mailbox_message_is_raw_info_test() {
   let foreign = dynamic.array([dynamic.int(17), dynamic.string("payload")])
   let _ = raw_send(machine.pid, foreign)
   assert process.receive(observed, 1000) == Ok(foreign)
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 // STATE TIMEOUT
@@ -779,7 +779,7 @@ pub fn state_timeout_delivers_custom_content_test() {
 // CAST
 //
 // 1. state_machine.cast delivers `Cast(msg)`.
-// 2. state_machine.send delivers Info(msg).
+// 2. process.send on the machine's Subject delivers Info(msg).
 // 3. The handler only responds to `Cast`, `Info` is silently dropped.
 type CastState {
   CastListening
@@ -817,7 +817,7 @@ pub fn cast_delivers_message_as_cast_event_test() {
 }
 
 pub fn send_delivers_message_as_info_not_cast_test() {
-  // state_machine.send -> Info(msg)
+  // process.send on the Subject -> Info(msg)
   // handler only handles Cast -> no reply -> timeout.
   let assert Ok(machine) =
     state_machine.new(initial_state: CastListening, initial_data: Nil)
@@ -825,7 +825,7 @@ pub fn send_delivers_message_as_info_not_cast_test() {
     |> state_machine.start_link
 
   let reply_sub = process.new_subject()
-  state_machine.send(subject_of(machine), Ping(reply_with: reply_sub))
+  process.send(subject_of(machine), Ping(reply_with: reply_sub))
 
   process.receive(reply_sub, 50) |> should.equal(Error(Nil))
 }
@@ -919,7 +919,7 @@ pub fn push_then_pop_callback_module_roundtrip_test() {
 //
 // The server receives Call(from, msg) events and must reply with the
 // Reply(from, value) action. This is different from the Info-based pattern
-// used by state_machine.call / process.call.
+// used by process.call on the machine's Subject.
 //
 
 type ReqState {
@@ -1330,7 +1330,7 @@ pub fn stop_server_terminates_machine_with_normal_test() {
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(d) { d })
 
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 
   let assert Ok(down) = process.selector_receive(sel, 1000)
   down.reason |> should.equal(process.Normal)
@@ -1355,7 +1355,7 @@ pub fn stop_server_with_custom_reason_test() {
   let reason = process.Abnormal(dynamic.string("shutdown_requested"))
   let _ =
     process.spawn_unlinked(fn() {
-      state_machine.stop_server_with(subject_of(machine), reason, 1000)
+      state_machine.stop_server_with(machine.ref, reason, 1000)
     })
 
   let assert Ok(process.ProcessDown(pid: down_pid, reason: observed, ..)) =
@@ -1434,7 +1434,7 @@ pub fn wait_timeout_preserves_the_request_for_a_later_reply_test() {
     == Error(state_machine.ReceiveTimeout)
   state_machine.send_reply(from, 31)
   assert state_machine.receive_response(req, 1000) == Ok(31)
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 pub fn receive_collection_distinguishes_empty_from_abandoned_test() {
@@ -1466,7 +1466,7 @@ pub fn receive_collection_distinguishes_empty_from_abandoned_test() {
   state_machine.send_reply(from, 31)
   assert state_machine.wait_response_timeout(request, 0)
     == Error(state_machine.ReceiveTimeout)
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 pub fn check_response_returns_none_for_unrelated_message_test() {
@@ -1522,4 +1522,103 @@ pub fn receive_response_blocking_returns_reply_test() {
     state_machine.send_request(machine.ref, CliGet)
   let assert Ok(value) = state_machine.receive_response_blocking(req)
   value |> should.equal(7)
+}
+
+// EDGE CASES
+//
+// `call` goes through gen_statem:call, `stop_server` reports instead of
+// crashing, and negative timeouts mean "now". The failed-start mailbox flush
+// is covered deterministically by EUnit in statem_ffi.erl.
+
+type EdgeMsg {
+  EdgeAsk
+  EdgeIgnore
+  EdgeArm(delay: Int, reply_with: process.Subject(String))
+  EdgeFired
+}
+
+fn edge_handler(
+  event: state_machine.Event(Nil, EdgeMsg, String),
+  _state: Nil,
+  _data: Nil,
+) -> state_machine.Step(Nil, Nil, EdgeMsg, String) {
+  case event {
+    state_machine.Call(from, EdgeAsk) ->
+      state_machine.keep_state_and_data([state_machine.Reply(from, "call")])
+    state_machine.Cast(EdgeArm(delay, reply_with)) ->
+      state_machine.keep_state(Nil, [
+        state_machine.StateTimeout(state_machine.After(delay), EdgeFired),
+        state_machine.GenericTimeout(
+          "edge",
+          state_machine.After(delay),
+          EdgeArm(delay, reply_with),
+        ),
+      ])
+    state_machine.Timeout(state_machine.GenericTimeoutType(_), EdgeArm(_, to)) -> {
+      process.send(to, "fired")
+      state_machine.keep_state_and_data([])
+    }
+    _ -> state_machine.keep_state_and_data([])
+  }
+}
+
+fn start_edge() -> state_machine.Started(EdgeMsg, String) {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(edge_handler)
+    |> state_machine.start
+  machine
+}
+
+pub fn call_delivers_a_call_event_and_its_reply_test() {
+  let machine = start_edge()
+  assert state_machine.call(machine.ref, EdgeAsk, waiting: 1000) == Ok("call")
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+}
+
+pub fn unanswered_call_times_out_without_crashing_the_caller_test() {
+  let machine = start_edge()
+  assert state_machine.call(machine.ref, EdgeIgnore, waiting: 10)
+    == Error(state_machine.ReceiveTimeout)
+  assert state_machine.call(machine.ref, EdgeIgnore, waiting: -1)
+    == Error(state_machine.ReceiveTimeout)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+}
+
+pub fn call_to_a_stopped_machine_reports_the_crash_test() {
+  let machine = start_edge()
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  let assert Error(state_machine.RequestCrashed(process.Abnormal(_))) =
+    state_machine.call(machine.ref, EdgeAsk, waiting: 100)
+}
+
+pub fn stopping_a_stopped_machine_returns_an_error_test() {
+  let machine = start_edge()
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  assert state_machine.stop_server(machine.ref)
+    == Error(state_machine.ServerNotRunning)
+  assert state_machine.stop_server_with(machine.ref, process.Normal, 100)
+    == Error(state_machine.ServerNotRunning)
+}
+
+pub fn globally_registered_machine_can_be_called_and_stopped_test() {
+  let name = atom.create("eparch_edge_global_machine")
+  let assert Ok(machine) =
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(edge_handler)
+    |> state_machine.named(state_machine.Global(name))
+    |> state_machine.start
+  assert state_machine.call(machine.ref, EdgeAsk, waiting: 1000) == Ok("call")
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  assert state_machine.stop_server(machine.ref)
+    == Error(state_machine.ServerNotRunning)
+}
+
+pub fn negative_relative_timeouts_fire_immediately_test() {
+  let machine = start_edge()
+  let reply = process.new_subject()
+  state_machine.cast(machine.ref, EdgeArm(-5, reply))
+  assert process.receive(reply, 1000) == Ok("fired")
+  assert process.is_alive(machine.pid)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }

@@ -12,6 +12,7 @@ gen_statem behavior callbacks and Gleam's type-safe API.
     do_start/2,
     do_start_monitor/1,
     cast/2,
+    call/3,
     ref_to_subject/1,
     ref_from_subject/1,
     ref_from_pid/1
@@ -162,7 +163,8 @@ handle_start_result({ok, Pid}, AckTag) when is_pid(Pid) ->
         {ok, ServerRef} -> {ok, {started, Pid, ServerRef}};
         Error -> Error
     end;
-handle_start_result(Error, _AckTag) ->
+handle_start_result(Error, AckTag) ->
+    flush_init_ack(AckTag),
     classify_start_error(Error).
 
 handle_monitor_start_result({ok, {Pid, MonRef}}, AckTag) when is_pid(Pid) ->
@@ -170,8 +172,19 @@ handle_monitor_start_result({ok, {Pid, MonRef}}, AckTag) when is_pid(Pid) ->
         {ok, ServerRef} -> {ok, {monitored_machine, Pid, ServerRef, MonRef}};
         Error -> Error
     end;
-handle_monitor_start_result(Error, _AckTag) ->
+handle_monitor_start_result(Error, AckTag) ->
+    flush_init_ack(AckTag),
     classify_start_error(Error).
+
+%% init/1 acknowledges before it returns, so a start that fails afterwards
+%% (an init timeout kills the child after the ack was sent) would otherwise
+%% leave `{AckTag, ServerRef}` in the caller's mailbox forever.
+-spec flush_init_ack(reference()) -> ok.
+flush_init_ack(AckTag) ->
+    receive
+        {AckTag, _} -> ok
+    after 0 -> ok
+    end.
 
 await_init_ack(AckTag) ->
     %% init/1 runs synchronously inside start_link/start/start_monitor, so
@@ -187,7 +200,7 @@ classify_start_error({error, timeout}) ->
 classify_start_error({error, {already_started, OtherPid}}) when is_pid(OtherPid) ->
     {error, {already_started, OtherPid}};
 classify_start_error({error, Reason}) ->
-    {error, {init_exited, {abnormal, Reason}}}.
+    {error, {init_exited, classify_exit_reason(Reason)}}.
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -358,7 +371,7 @@ format_status(
                     (reason, OrigReason) ->
                         case NewReason of
                             none -> OrigReason;
-                            {some, R} -> unclassify_reason(R)
+                            {some, R} -> convert_exit_reason(R)
                         end;
                     (queue, _) ->
                         [unclassify_queue_entry(E, SubjectTag) || E <- NewQueue];
@@ -385,17 +398,21 @@ format_status(
 
 classify_reason_opt(Status) ->
     case maps:find(reason, Status) of
-        {ok, R} -> {some, classify_reason(R)};
+        {ok, R} -> {some, classify_exit_reason(R)};
         error -> none
     end.
 
-%% Fieldless Gleam constructors are atoms, not one-tuples.
-classify_reason(normal) -> {exit, normal};
-classify_reason(killed) -> {exit, killed};
-classify_reason(Other) -> {raw_reason, Other}.
+-doc """
+Converts an Erlang exit reason to a Gleam `process.ExitReason`.
 
-unclassify_reason({exit, Reason}) -> convert_exit_reason(Reason);
-unclassify_reason({raw_reason, Term}) -> Term.
+Every term has exactly one image, and `convert_exit_reason/1` inverts it, so
+the pair round-trips for all terms. Fieldless Gleam constructors are atoms,
+not one-tuples.
+""".
+-spec classify_exit_reason(term()) -> normal | killed | {abnormal, term()}.
+classify_exit_reason(normal) -> normal;
+classify_exit_reason(killed) -> killed;
+classify_exit_reason(Other) -> {abnormal, Other}.
 
 classify_queue_entries(Entries, SubjectTag) ->
     [classify_queue_entry(E, SubjectTag) || E <- Entries].
@@ -493,7 +510,7 @@ convert_event_to_gleam(EventType, EventContent, _State, GleamStatem) ->
             %% Unnamed event timeout fired.
             %% Gleam: Timeout(EventTimeoutType, content)
             {timeout, event_timeout_type, EventContent};
-        {timeout, Name} ->
+        {timeout, Name} when is_binary(Name) ->
             %% Named generic timeout fired.
             %% Gleam: Timeout(GenericTimeoutType(name), content)
             {timeout, {generic_timeout_type, Name}, EventContent};
@@ -612,17 +629,11 @@ convert_action_to_erlang(Action, Tag) ->
 %% `At` produces the 4-tuple form with `[{abs, true}]` so `Ms` is treated
 %% as an absolute erlang:monotonic_time(millisecond) deadline.
 timeout_action(Tag, {'after', Ms}, Content) ->
-    {Tag, Ms, Content};
+    %% gen_statem rejects a negative relative time as a bad action, which
+    %% would crash the machine; a delay in the past means "now".
+    {Tag, max(0, Ms), Content};
 timeout_action(Tag, {at, Ms}, Content) ->
     {Tag, Ms, Content, [{abs, true}]}.
-
-subject_to_pid({subject, Pid, _Tag}) ->
-    Pid;
-subject_to_pid({named_subject, Name}) ->
-    case erlang:whereis(Name) of
-        Pid when is_pid(Pid) -> Pid;
-        undefined -> error({noproc, Name})
-    end.
 
 -doc """
 Sends an asynchronous `cast` to a running `gen_statem` via its `ServerRef`.
@@ -665,15 +676,56 @@ is associated.
 """.
 ref_from_pid(Pid) when is_pid(Pid) -> {server_ref_pid, Pid}.
 
+-doc """
+Synchronously call a `gen_statem` through its `ServerRef`.
+
+The machine receives `Call(From, Msg)`. `gen_statem:call/3` exits the caller
+when the server is absent, dies, or does not reply in time; those exits are
+caught and returned as a Gleam `ReceiveError`.
+""".
+-spec call(tuple(), term(), integer()) ->
+    {ok, term()} | {error, receive_timeout | {request_crashed, term()}}.
+call(ServerRef, Msg, Timeout) ->
+    try gen_statem:call(ref_target(ServerRef), Msg, clamp_timeout(Timeout)) of
+        Reply -> {ok, Reply}
+    catch
+        exit:{timeout, {gen_statem, call, _}} ->
+            {error, receive_timeout};
+        exit:{Reason, {gen_statem, call, _}} ->
+            {error, {request_crashed, classify_exit_reason(Reason)}}
+    end.
+
 -doc "Stop a running state machine with reason `normal`.".
-stop_server(Subject) ->
-    gen_statem:stop(subject_to_pid(Subject)),
-    nil.
+-spec stop_server(tuple()) -> {ok, nil} | {error, term()}.
+stop_server(ServerRef) ->
+    stop_target(ServerRef, normal, infinity).
 
 -doc "Stop a running state machine with a custom reason and timeout (ms).".
-stop_server_with(Subject, Reason, Timeout) ->
-    gen_statem:stop(subject_to_pid(Subject), convert_exit_reason(Reason), Timeout),
-    nil.
+-spec stop_server_with(tuple(), term(), integer()) -> {ok, nil} | {error, term()}.
+stop_server_with(ServerRef, Reason, Timeout) ->
+    stop_target(ServerRef, convert_exit_reason(Reason), clamp_timeout(Timeout)).
+
+%% gen_statem:stop/3 documents exactly these caller exits: `noproc`,
+%% `{nodedown, Node}`, `timeout`, or the server's own termination reason when
+%% it differs from the requested one. The last clause is that documented
+%% case, not a blanket catch; only the `exit` class is intercepted.
+-spec stop_target(tuple(), term(), timeout()) -> {ok, nil} | {error, term()}.
+stop_target(ServerRef, Reason, Timeout) ->
+    try gen_statem:stop(ref_target(ServerRef), Reason, Timeout) of
+        ok -> {ok, nil}
+    catch
+        exit:noproc -> {error, server_not_running};
+        exit:{nodedown, _} -> {error, server_not_running};
+        exit:timeout -> {error, stop_timeout};
+        exit:Other -> {error, {stopped_with, classify_exit_reason(Other)}}
+    end.
+
+%% Erlang raises `timeout_value` for an `after` outside 0..2^32-1. Gleam
+%% callers get "do not wait" for negative values and the longest finite wait
+%% for oversized ones, matching `eparch_delivery_ffi:request/3`.
+-spec clamp_timeout(timeout() | integer()) -> timeout().
+clamp_timeout(infinity) -> infinity;
+clamp_timeout(Ms) when is_integer(Ms) -> min(16#ffffffff, max(0, Ms)).
 
 -doc "Send a reply to a caller from outside the state machine callback.".
 send_reply(From, Reply) ->
@@ -701,7 +753,7 @@ wait_response(ReqId) ->
         1,
         case gen_statem:wait_response(ReqId) of
             {reply, Reply} -> {ok, Reply};
-            {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+            {error, {Reason, _}} -> {error, {request_crashed, classify_exit_reason(Reason)}}
         end
     ).
 
@@ -712,10 +764,10 @@ wait_response_timeout(ReqId, Timeout) ->
         gen_statem,
         wait_response,
         2,
-        case gen_statem:wait_response(ReqId, Timeout) of
+        case gen_statem:wait_response(ReqId, clamp_timeout(Timeout)) of
             {reply, Reply} -> {ok, Reply};
             timeout -> {error, receive_timeout};
-            {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+            {error, {Reason, _}} -> {error, {request_crashed, classify_exit_reason(Reason)}}
         end
     ).
 
@@ -727,8 +779,10 @@ receive_response_blocking(ReqId) ->
         receive_response,
         1,
         case gen_statem:receive_response(ReqId) of
-            {reply, Reply} -> {ok, Reply};
-            {error, {Reason, _ServerRef}} -> {error, {request_crashed, classify_reason(Reason)}}
+            {reply, Reply} ->
+                {ok, Reply};
+            {error, {Reason, _ServerRef}} ->
+                {error, {request_crashed, classify_exit_reason(Reason)}}
         end
     ).
 
@@ -745,7 +799,7 @@ check_response(Msg, ReqId) ->
         case gen_statem:check_response(Msg, ReqId) of
             {reply, Reply} -> {ok, {some, Reply}};
             no_reply -> {ok, none};
-            {error, {Reason, _}} -> {error, {request_crashed, classify_reason(Reason)}}
+            {error, {Reason, _}} -> {error, {request_crashed, classify_exit_reason(Reason)}}
         end
     ).
 
@@ -820,13 +874,13 @@ receive_response(ReqId, Timeout) ->
         gen_statem,
         receive_response,
         2,
-        case gen_statem:receive_response(ReqId, Timeout) of
+        case gen_statem:receive_response(ReqId, clamp_timeout(Timeout)) of
             {reply, Reply} ->
                 {ok, Reply};
             timeout ->
                 {error, receive_timeout};
             {error, {Reason, _ServerRef}} ->
-                {error, {request_crashed, classify_reason(Reason)}}
+                {error, {request_crashed, classify_exit_reason(Reason)}}
         end
     ).
 
@@ -850,11 +904,11 @@ receive_response_collection(Collection, Timeout, Handling) ->
         gen_statem,
         receive_response,
         3,
-        case gen_statem:receive_response(Collection, Timeout, Delete) of
+        case gen_statem:receive_response(Collection, clamp_timeout(Timeout), Delete) of
             {{reply, Reply}, Label, NewColl} ->
                 {got_reply, Reply, Label, NewColl};
             {{error, {Reason, _ServerRef}}, Label, NewColl} ->
-                {request_failed, classify_reason(Reason), Label, NewColl};
+                {request_failed, classify_exit_reason(Reason), Label, NewColl};
             timeout ->
                 collection_timeout;
             no_request ->
@@ -868,3 +922,84 @@ Converts a Gleam ExitReason to an Erlang exit reason term.
 convert_exit_reason(normal) -> normal;
 convert_exit_reason(killed) -> killed;
 convert_exit_reason({abnormal, Term}) -> Term.
+
+%%%===================================================================
+%%% Tests
+%%%===================================================================
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+exit_reasons() ->
+    [normal, killed, shutdown, {shutdown, x}, {noproc, y}, kill, 42, <<"boom">>, {abnormal, z}].
+
+exit_reason_round_trip_test() ->
+    [?assertEqual(R, convert_exit_reason(classify_exit_reason(R))) || R <- exit_reasons()].
+
+exit_reason_classification_is_canonical_test() ->
+    ?assertEqual(normal, classify_exit_reason(normal)),
+    ?assertEqual(killed, classify_exit_reason(killed)),
+    ?assertEqual({abnormal, shutdown}, classify_exit_reason(shutdown)).
+
+queue_entry_round_trip_test() ->
+    Tag = make_ref(),
+    Entries = [
+        {{call, {self(), make_ref()}}, a},
+        {cast, b},
+        {info, {Tag, c}},
+        {info, {make_ref(), d}},
+        {info, untagged},
+        {internal, e},
+        {state_timeout, f},
+        {timeout, g},
+        {{timeout, <<"named">>}, h},
+        {{timeout, atom_name}, i},
+        {enter, j},
+        unexpected_shape
+    ],
+    [
+        ?assertEqual(E, unclassify_queue_entry(classify_queue_entry(E, Tag), Tag))
+     || E <- Entries
+    ].
+
+timeout_round_trip_test() ->
+    Entries = [
+        {state_timeout, a},
+        {timeout, b},
+        {{timeout, <<"named">>}, c},
+        {{timeout, atom_name}, d},
+        weird
+    ],
+    [?assertEqual(T, unclassify_timeout(classify_timeout(T))) || T <- Entries].
+
+non_binary_generic_timeout_name_is_raw_test() ->
+    Statem = #gleam_statem{subject_tag = make_ref()},
+    ?assertMatch(
+        {raw_info, {unexpected_event, {timeout, some_atom}, x}},
+        convert_event_to_gleam({timeout, some_atom}, x, state, Statem)
+    ).
+
+negative_relative_timeout_is_clamped_test() ->
+    ?assertEqual({state_timeout, 0, c}, timeout_action(state_timeout, {'after', -5}, c)),
+    ?assertEqual({timeout, -5, c, [{abs, true}]}, timeout_action(timeout, {at, -5}, c)).
+
+failed_start_flushes_a_delivered_ack_test() ->
+    Tag = make_ref(),
+    Other = make_ref(),
+    self() ! {Tag, {server_ref_pid, self()}},
+    self() ! {Other, unrelated},
+    ?assertEqual({error, init_timeout}, handle_start_result({error, timeout}, Tag)),
+    ?assertEqual(
+        {error, init_timeout}, handle_monitor_start_result({error, timeout}, Tag)
+    ),
+    ?assertEqual({messages, [{Other, unrelated}]}, process_info(self(), messages)),
+    receive
+        {Other, unrelated} -> ok
+    end.
+
+timeout_clamp_bounds_test() ->
+    ?assertEqual(0, clamp_timeout(-1)),
+    ?assertEqual(16#ffffffff, clamp_timeout(16#ffffffff + 1)),
+    ?assertEqual(infinity, clamp_timeout(infinity)),
+    ?assertError(function_clause, clamp_timeout(not_a_timeout)).
+-endif.

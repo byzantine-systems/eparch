@@ -98,23 +98,12 @@ pub type Status(state, data, message, reply) {
   Status(
     state: state,
     data: data,
-    reason: Option(StopReason),
+    reason: Option(ExitReason),
     queue: List(QueuedEvent(message, reply)),
     postponed: List(QueuedEvent(message, reply)),
     timeouts: List(ActiveTimeout(message)),
     log: List(Dynamic),
   )
-}
-
-/// Termination reason as seen by `format_status/1`.
-///
-/// `Exit` wraps a recognised `process.ExitReason`. `RawReason` is a fallback
-/// for reasons the FFI cannot classify (e.g. `{shutdown, _}`, `{noproc, _}`,
-/// arbitrary user terms) so callers can still inspect or replace them.
-///
-pub type StopReason {
-  Exit(reason: ExitReason)
-  RawReason(term: Dynamic)
 }
 
 /// A pending event on the gen_statem queue or in the postponed list.
@@ -224,7 +213,8 @@ pub type Action(message, reply) {
   NextEvent(event_type: NextEventType(reply), content: message)
 
   /// Set a state timeout (canceled on state change). `content` is delivered
-  /// as the `Timeout` event payload when the timer fires.
+  /// as the `Timeout` event payload when the timer fires. A negative
+  /// `After` delay fires immediately.
   StateTimeout(time: TimeoutTime, content: message)
 
   /// Set an event timeout, the unnamed `timeout()` action from gen_statem.
@@ -342,9 +332,12 @@ pub type MonitoredMachine(message, reply) {
 
 /// Errors that can occur when starting a state machine.
 pub type StartError {
+  /// `init/1` did not finish within the builder's timeout.
   InitTimeout
-  InitFailed(String)
-  InitExited(ExitReason)
+  /// The process started but never handed back its `ServerRef`.
+  InitFailed(reason: String)
+  /// The process exited before initialisation completed.
+  InitExited(reason: ExitReason)
   /// The requested name was already registered to another process.
   AlreadyStarted(pid: Pid)
 }
@@ -381,8 +374,10 @@ pub type ResponseHandling {
 pub type ReceiveError {
   /// No reply was received within the timeout.
   ReceiveTimeout
-  /// The server handling the request crashed or went away.
-  RequestCrashed(reason: StopReason)
+  /// The server handling the request crashed or went away. Any reason
+  /// other than `normal` or `killed` arrives as `Abnormal(term)`, including
+  /// `noproc` when no server was found.
+  RequestCrashed(reason: ExitReason)
 }
 
 /// The result of waiting for a response from a `RequestIdCollection`.
@@ -397,7 +392,7 @@ pub type CollectionResponse(reply, label) {
 
   /// One of the requests returned an error (e.g. the server crashed).
   RequestFailed(
-    reason: StopReason,
+    reason: ExitReason,
     label: label,
     remaining: RequestIdCollection(label, reply),
   )
@@ -1006,22 +1001,11 @@ pub fn reply_and_keep(
   KeepState(data:, actions: [Reply(from:, response:)])
 }
 
-/// Send a message to a state machine via `process.send` (arrives as `Info`).
-///
-/// The Subject tags the payload so the handler receives `Info(message)`.
-/// Untagged Erlang messages instead arrive as `RawInfo(term)`.
-///
-/// To deliver messages as `Cast(message)` instead, use `cast/2`.
-///
-pub fn send(subject: Subject(message), message: message) -> Nil {
-  process.send(subject, message)
-}
-
 /// Send an asynchronous cast to a state machine (arrives as `Cast`).
 ///
-/// Unlike `send`, which routes messages through `process.send` and delivers
-/// them as `Info(message)`, this function calls `gen_statem:cast` so messages
-/// arrive as `Cast(message)` in the event handler.
+/// Unlike `process.send` on the machine's `Subject` (see `ref_to_subject`),
+/// which delivers `Info(message)`, this function calls `gen_statem:cast` so
+/// messages arrive as `Cast(message)` in the event handler.
 ///
 /// Use `cast` when you want to distinguish machine-level commands from
 /// ambient info messages (monitors, raw Erlang signals, etc.).
@@ -1044,17 +1028,31 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 @external(erlang, "statem_ffi", "cast")
 pub fn cast(ref: ServerRef(message, reply), message: message) -> Nil
 
-/// Send a synchronous call and wait for a reply.
+/// Send a synchronous call and wait up to `timeout` milliseconds for the
+/// reply.
 ///
-/// This is a re-export of `process.call` for convenience.
+/// Maps to `gen_statem:call/3`, so the handler receives `Call(from, message)`
+/// and answers with a `Reply(from, value)` action. Works for every kind of
+/// `ServerRef`, including `Global` and `Via` registrations. A negative
+/// timeout means "do not wait".
 ///
+/// Returns `Error(ReceiveTimeout)` when no reply arrives in time (OTP 24+
+/// drops a late reply), and `Error(RequestCrashed(reason))` when the server
+/// is absent or exits before replying.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(count) =
+///   state_machine.call(machine.ref, GetCount, waiting: 1000)
+/// ```
+///
+@external(erlang, "statem_ffi", "call")
 pub fn call(
-  subject: Subject(message),
+  ref: ServerRef(message, reply),
+  message: message,
   waiting timeout: Int,
-  sending make_message: fn(Subject(reply)) -> message,
-) -> reply {
-  process.call(subject, timeout, make_message)
-}
+) -> Result(reply, ReceiveError)
 
 // request-id API (OTP 25.0+)
 
@@ -1191,19 +1189,49 @@ pub fn receive_response_collection(
   handling: ResponseHandling,
 ) -> CollectionResponse(reply, label)
 
-/// Stop a running state machine from the client with reason `normal`.
+/// Why `stop_server` or `stop_server_with` could not confirm termination.
+///
+pub type StopError {
+  /// No process was registered under the ref, or its node is down.
+  ServerNotRunning
+  /// The server did not terminate within the timeout.
+  StopTimeout
+  /// The server terminated, but with a different reason than requested.
+  StoppedWith(reason: ExitReason)
+}
+
+/// Stop a running state machine from the client with reason `normal`,
+/// waiting as long as it takes.
+///
+/// Maps to `gen_statem:stop/1`. Works for every kind of `ServerRef`.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+/// state_machine.stop_server(machine.ref)
+/// // -> Error(ServerNotRunning)
+/// ```
 ///
 @external(erlang, "statem_ffi", "stop_server")
-pub fn stop_server(subject: Subject(message)) -> Nil
+pub fn stop_server(ref: ServerRef(message, reply)) -> Result(Nil, StopError)
 
-/// Stop a running state machine from the client with a custom reason and timeout (ms).
+/// Stop a running state machine with a custom reason, waiting up to
+/// `timeout` milliseconds. Maps to `gen_statem:stop/3`. A negative timeout
+/// means "do not wait".
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.stop_server_with(machine.ref, process.Normal, 1000)
+/// ```
 ///
 @external(erlang, "statem_ffi", "stop_server_with")
 pub fn stop_server_with(
-  subject: Subject(message),
+  ref: ServerRef(message, reply),
   reason: ExitReason,
   timeout: Int,
-) -> Nil
+) -> Result(Nil, StopError)
 
 /// Send a reply to a caller from outside the state machine callback.
 ///
