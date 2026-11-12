@@ -14,7 +14,6 @@ import eparch/event_manager
 import gleam/erlang/process
 import gleam/list
 import gleam/option.{None}
-import gleeunit/should
 import simplifile
 import terminal_logger.{type ErrorEvent, Reported}
 
@@ -69,8 +68,7 @@ pub fn notify_broadcasts_to_all_handlers_test() {
   terminal_logger.report(manager, "first")
   terminal_logger.report(manager, "second")
 
-  collect(inbox, 2)
-  |> should.equal([Reported("first"), Reported("second")])
+  assert collect(inbox, 2) == [Reported("first"), Reported("second")]
 
   terminal_logger.stop(manager)
 }
@@ -86,8 +84,8 @@ pub fn fan_out_delivers_to_multiple_handlers_test() {
 
   terminal_logger.report(manager, "broadcast")
 
-  collect(inbox_a, 1) |> should.equal([Reported("broadcast")])
-  collect(inbox_b, 1) |> should.equal([Reported("broadcast")])
+  assert collect(inbox_a, 1) == [Reported("broadcast")]
+  assert collect(inbox_b, 1) == [Reported("broadcast")]
 
   terminal_logger.stop(manager)
 }
@@ -108,9 +106,8 @@ pub fn removed_handler_stops_receiving_events_test() {
 
   terminal_logger.report(manager, "after")
 
-  collect(inbox_kept, 2)
-  |> should.equal([Reported("before"), Reported("after")])
-  collect(inbox_removed, 1) |> should.equal([Reported("before")])
+  assert collect(inbox_kept, 2) == [Reported("before"), Reported("after")]
+  assert collect(inbox_removed, 1) == [Reported("before")]
 
   terminal_logger.stop(manager)
 }
@@ -134,8 +131,7 @@ pub fn file_logger_appends_each_event_to_file_test() {
     == event_manager.Confirmed
 
   let assert Ok(contents) = simplifile.read(path)
-  contents
-  |> should.equal("***Error*** alpha\n***Error*** beta\n")
+  assert contents == "***Error*** alpha\n***Error*** beta\n"
 
   let _ = simplifile.delete(path)
   terminal_logger.stop(manager)

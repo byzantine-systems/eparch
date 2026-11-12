@@ -11,7 +11,6 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
-import gleeunit/should
 
 @external(erlang, "erlang", "process_info")
 fn process_info(pid: process.Pid, key: atom.Atom) -> Dynamic
@@ -76,12 +75,12 @@ pub fn start_link_local_resolves_via_process_named_test() {
 
   let assert Ok(subject) = state_machine.ref_to_subject(machine.ref)
   let assert Ok(named_pid) = process.named(name)
-  named_pid |> should.equal(machine.pid)
+  assert named_pid == machine.pid
 
   let reply = process.new_subject()
   process.send(subject, Ping(reply))
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong")
+  assert payload == "pong"
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +101,7 @@ pub fn start_unlinked_does_not_propagate_crash_test() {
   let assert Ok(_down) = process.selector_receive(selector, 1000)
 
   // The fact that we got here at all is the test: the parent did not exit.
-  process.self() |> should.not_equal(machine.pid)
+  assert process.self() != machine.pid
 }
 
 // ---------------------------------------------------------------------------
@@ -120,11 +119,9 @@ pub fn start_monitor_delivers_down_test() {
   // unlinking or trapping exits in the caller.
   state_machine.cast(monitored.ref, Crash)
 
-  let assert Ok(down) = process.selector_receive(selector, 1000)
-  case down {
-    process.ProcessDown(pid:, ..) -> pid |> should.equal(monitored.pid)
-    process.PortDown(..) -> panic as "expected ProcessDown"
-  }
+  let assert Ok(process.ProcessDown(pid:, ..)) =
+    process.selector_receive(selector, 1000)
+  assert pid == monitored.pid
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +137,10 @@ pub fn global_named_start_routes_through_global_module_test() {
     |> state_machine.start_link
 
   // The global registry knows about the process.
-  global_whereis(global_name)
-  |> decode.run(decode.dynamic)
-  |> should.be_ok
+  let assert Ok(_) = global_whereis(global_name) |> decode.run(decode.dynamic)
 
   // No Subject is exposed for global-registered servers.
-  state_machine.ref_to_subject(machine.ref) |> should.equal(Error(Nil))
+  assert state_machine.ref_to_subject(machine.ref) == Error(Nil)
 
   // gen_statem:cast on the global tuple delivers a Cast event.
   let reply = process.new_subject()
@@ -154,7 +149,7 @@ pub fn global_named_start_routes_through_global_module_test() {
   let _ = gen_statem_cast(global_target, cast_msg)
 
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong-cast")
+  assert payload == "pong-cast"
 }
 
 @external(erlang, "eparch_test_helpers", "encode_global_target")
@@ -179,14 +174,14 @@ pub fn via_global_routes_through_via_target_test() {
     ))
     |> state_machine.start_link
 
-  state_machine.ref_to_subject(machine.ref) |> should.equal(Error(Nil))
+  assert state_machine.ref_to_subject(machine.ref) == Error(Nil)
 
   let reply = process.new_subject()
   state_machine.cast(machine.ref, Ping(reply))
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong-cast")
+  assert payload == "pong-cast"
 
-  machine.pid |> should.not_equal(process.self())
+  assert machine.pid != process.self()
 }
 
 @external(erlang, "eparch_test_helpers", "encode_atom_as_term")
@@ -205,7 +200,7 @@ pub fn with_spawn_options_sets_process_priority_test() {
     |> state_machine.start_link
 
   let info = process_info(machine.pid, atom.create("priority"))
-  decoded_priority_atom(info) |> should.equal(atom.create("high"))
+  assert decoded_priority_atom(info) == atom.create("high")
 }
 
 fn decoded_priority_atom(info: Dynamic) -> atom.Atom {
@@ -233,7 +228,7 @@ pub fn with_debug_accepts_log_flag_test() {
   let reply = process.new_subject()
   process.send(subject, Ping(reply))
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong")
+  assert payload == "pong"
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +251,7 @@ pub fn with_hibernate_after_accepts_option_test() {
   let reply = process.new_subject()
   process.send(subject, Ping(reply))
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong")
+  assert payload == "pong"
 
   process.sleep(80)
 
@@ -264,7 +259,7 @@ pub fn with_hibernate_after_accepts_option_test() {
   let reply2 = process.new_subject()
   process.send(subject, Ping(reply2))
   let assert Ok(payload2) = process.receive(reply2, 1000)
-  payload2 |> should.equal("pong")
+  assert payload2 == "pong"
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +275,7 @@ pub fn ref_from_subject_round_trip_test() {
   state_machine.cast(wrapped, Ping(reply))
 
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong-cast")
+  assert payload == "pong-cast"
 }
 
 pub fn ref_from_pid_supports_cast_test() {
@@ -288,10 +283,10 @@ pub fn ref_from_pid_supports_cast_test() {
 
   let from_pid = state_machine.unsafe_ref_from_pid(machine.pid)
   // ref_from_pid produces a ref with no associated Subject.
-  state_machine.ref_to_subject(from_pid) |> should.equal(Error(Nil))
+  assert state_machine.ref_to_subject(from_pid) == Error(Nil)
 
   let reply = process.new_subject()
   state_machine.cast(from_pid, Ping(reply))
   let assert Ok(payload) = process.receive(reply, 1000)
-  payload |> should.equal("pong-cast")
+  assert payload == "pong-cast"
 }
