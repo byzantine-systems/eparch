@@ -46,9 +46,12 @@ Full API reference: <https://hexdocs.pm/eparch>.
 
 `notify` sends without waiting. `sync_notify` freezes membership on acceptance:
 `Confirmed` means every callback in that snapshot returned. `Unconfirmed` is
-not proof of non-processing. `SyncBusy` rejects before dispatch; `SyncTimeout`
-ends the caller's wait without cancelling work. Removal drains earlier
-broadcasts. `replace_handler` starts the replacement with its own initial state.
+not proof of non-processing. `SyncBusy` (saturated) and `SyncReentrant` (a
+handler waiting on itself) reject before dispatch; `SyncTimeout` ends the
+caller's wait without cancelling work; `SyncManagerDown` reports a manager
+that is gone. Removal drains earlier broadcasts. `replace_handler` starts the
+replacement with its own initial state. A linked manager exits with its
+parent's reason, so supervisors see `shutdown` rather than `normal`.
 
 Timed event-manager requests use process aliases (OTP 24+): a timeout retires
 the reply address without cancelling work. `stop` returns `Ok(Nil)` on

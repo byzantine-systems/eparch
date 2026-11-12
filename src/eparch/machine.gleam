@@ -150,6 +150,18 @@ const delivery_fuel = 65_536
 /// The first drive runs the initial entry before delivering input. Use
 /// `begin` to observe its effects separately.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let counter =
+///   machine.new(phase: Idle, data: 0, handler: fn(input, phase, count) {
+///     case input {
+///       machine.Cast(Increment) -> machine.KeepState(count + 1, [])
+///       _ -> machine.KeepStateAndData([])
+///     }
+///   })
+/// ```
+///
 pub fn new(
   phase phase: state,
   data data: data,
@@ -173,6 +185,15 @@ pub fn new(
 /// Enable the enter callback, called on every state change with the previous
 /// phase, and on the initial `begin`, and on `RepeatState`.
 ///
+/// ## Example
+///
+/// ```gleam
+/// machine.new(phase: Idle, data: [], handler: handle)
+/// |> machine.with_state_enter(fn(_old, log) {
+///   machine.EnterKeep(["entered", ..log], [])
+/// })
+/// ```
+///
 pub fn with_state_enter(
   machine: Machine(state, data, msg, reply),
   on_enter on_enter: fn(state, data) -> EnterStep(data, msg, reply),
@@ -184,6 +205,12 @@ pub fn with_state_enter(
 ///
 /// Returns its effects and the machine ready to receive inputs. Calling
 /// `begin` on a machine without an enter callback is a no-op.
+///
+/// ## Example
+///
+/// ```gleam
+/// let #(entry_effects, ready) = machine.begin(counter)
+/// ```
 ///
 pub fn begin(
   machine: Machine(state, data, msg, reply),
@@ -213,6 +240,14 @@ fn initialise(
 /// Delivering an input to a stopped machine is a defined no-op: no effects,
 /// unchanged machine.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let #(effects, counter) = machine.step(counter, machine.Cast(Increment))
+/// machine.data(counter)
+/// // -> 1
+/// ```
+///
 pub fn step(
   machine: Machine(state, data, msg, reply),
   input: Input(msg, reply),
@@ -222,6 +257,15 @@ pub fn step(
 
 /// Queue an input and process up to `budget` inputs. Inspect `progress` on
 /// the returned machine before treating its data as a settled observation.
+///
+/// ## Example
+///
+/// ```gleam
+/// let #(first, partial) = machine.step_with_budget(chain, machine.Cast(10), 1)
+/// machine.progress(partial)
+/// // -> machine.NeedsResume
+/// ```
+///
 pub fn step_with_budget(
   machine: Machine(state, data, msg, reply),
   input: Input(msg, reply),
@@ -236,12 +280,26 @@ pub fn step_with_budget(
   }
 }
 
+/// Whether a machine has runnable work left at the current logical instant,
+/// as reported by `progress` after a budget-limited drive.
 pub type Progress {
+  /// Nothing is queued, or the machine has stopped.
   Settled
+  /// The budget ran out with inputs still queued; call `resume`.
   NeedsResume
 }
 
 /// Whether there is runnable work left at the current logical instant.
+///
+/// ## Example
+///
+/// ```gleam
+/// case machine.progress(partial) {
+///   machine.Settled -> machine.data(partial)
+///   machine.NeedsResume -> machine.data(machine.resume(partial, 100).1)
+/// }
+/// ```
+///
 pub fn progress(machine: Machine(state, data, msg, reply)) -> Progress {
   case machine.queue, machine.lifecycle {
     [_, ..], Fresh | [_, ..], Running -> NeedsResume
@@ -250,6 +308,13 @@ pub fn progress(machine: Machine(state, data, msg, reply)) -> Progress {
 }
 
 /// Continue queued work without adding an input or advancing the clock.
+///
+/// ## Example
+///
+/// ```gleam
+/// let #(rest, settled) = machine.resume(partial, 100)
+/// ```
+///
 pub fn resume(
   machine: Machine(state, data, msg, reply),
   budget: Int,
@@ -263,6 +328,14 @@ pub fn resume(
 /// any already-queued events, then settling the whole queue.
 /// This is a clock jump: a callback rearming a relative timer uses the new
 /// clock reading rather than the nominal deadline of the expired timer.
+///
+/// ## Example
+///
+/// ```gleam
+/// let #(effects, later) = machine.advance_time(armed, 5000)
+/// machine.clock(later)
+/// // -> 5000
+/// ```
 ///
 pub fn advance_time(
   machine: Machine(state, data, msg, reply),
@@ -640,11 +713,25 @@ fn update_timer(
 
 /// The current phase.
 ///
+/// ## Example
+///
+/// ```gleam
+/// machine.phase(counter)
+/// // -> Idle
+/// ```
+///
 pub fn phase(machine: Machine(state, data, msg, reply)) -> state {
   machine.phase
 }
 
 /// The current data.
+///
+/// ## Example
+///
+/// ```gleam
+/// machine.data(counter)
+/// // -> 0
+/// ```
 ///
 pub fn data(machine: Machine(state, data, msg, reply)) -> data {
   machine.data
@@ -652,11 +739,25 @@ pub fn data(machine: Machine(state, data, msg, reply)) -> data {
 
 /// The current logical clock, advanced by `advance_time`.
 ///
+/// ## Example
+///
+/// ```gleam
+/// machine.clock(machine.new(phase: Idle, data: 0, handler: handle))
+/// // -> 0
+/// ```
+///
 pub fn clock(machine: Machine(state, data, msg, reply)) -> Int {
   machine.clock
 }
 
 /// Whether the machine has stopped.
+///
+/// ## Example
+///
+/// ```gleam
+/// machine.is_stopped(counter)
+/// // -> False
+/// ```
 ///
 pub fn is_stopped(machine: Machine(state, data, msg, reply)) -> Bool {
   case machine.lifecycle {
@@ -666,6 +767,14 @@ pub fn is_stopped(machine: Machine(state, data, msg, reply)) -> Bool {
 }
 
 /// Why the machine stopped, if it has.
+///
+/// ## Example
+///
+/// ```gleam
+/// let #(_, done) = machine.step(counter, machine.Cast(Shutdown))
+/// machine.stop_reason(done)
+/// // -> Some(process.Normal)
+/// ```
 ///
 pub fn stop_reason(
   machine: Machine(state, data, msg, reply),
@@ -678,6 +787,13 @@ pub fn stop_reason(
 
 /// The timers currently armed: kind, remaining milliseconds, and payload.
 ///
+/// ## Example
+///
+/// ```gleam
+/// machine.pending_timeouts(armed)
+/// // -> [#(effect.StateTimer, 5000, Expire)]
+/// ```
+///
 pub fn pending_timeouts(
   machine: Machine(state, data, msg, reply),
 ) -> List(#(TimerKind, Int, msg)) {
@@ -687,6 +803,13 @@ pub fn pending_timeouts(
 }
 
 /// The inputs currently postponed, oldest first.
+///
+/// ## Example
+///
+/// ```gleam
+/// machine.postponed_inputs(waiting)
+/// // -> [machine.Cast(Request(1))]
+/// ```
 ///
 pub fn postponed_inputs(
   machine: Machine(state, data, msg, reply),

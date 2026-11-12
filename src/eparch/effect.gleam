@@ -55,6 +55,13 @@ pub opaque type TimerId {
 /// The name only has to be unique within one machine. Reusing the same
 /// `timer_id(...)` value for the same conceptual timer is the intended use.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let heartbeat = effect.timer_id("heartbeat")
+/// effect.GenericTimeout(heartbeat, effect.After(1000), Beat)
+/// ```
+///
 pub fn timer_id(name: String) -> TimerId {
   TimerId(name)
 }
@@ -219,6 +226,17 @@ pub fn decides_timer(effect: Effect(msg, reply), kind: TimerKind) -> Bool {
 /// other effect keeps its order and position. The result is stable:
 /// resolving an already-resolved list changes nothing, and resolving a
 /// concatenation agrees with resolving the parts first.
+///
+/// ## Example
+///
+/// ```gleam
+/// effect.resolve([
+///   effect.StateTimeout(effect.After(10), First),
+///   effect.Postpone,
+///   effect.CancelStateTimeout,
+/// ])
+/// // -> [effect.Postpone, effect.CancelStateTimeout]
+/// ```
 ///
 pub fn resolve(effects: List(Effect(msg, reply))) -> List(Effect(msg, reply)) {
   let #(resolved, _) =
