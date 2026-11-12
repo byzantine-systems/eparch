@@ -506,3 +506,81 @@ pub fn composition_checker_rejects_lost_effects_test() {
     False -> panic as "composition oracle disagrees with an honest run"
   }
 }
+
+// ---------------------------------------------------------------------------
+// Driving laws: budgets, idempotent entry, and clock identities.
+// ---------------------------------------------------------------------------
+
+fn drain(
+  m: Machine(Int, Int, Int, Int),
+  budget: Int,
+  acc: List(effect.Effect(Int, Int)),
+) -> #(List(effect.Effect(Int, Int)), Machine(Int, Int, Int, Int)) {
+  case machine.progress(m) {
+    machine.Settled -> #(acc, m)
+    machine.NeedsResume -> {
+      let #(more, m) = machine.resume(m, budget)
+      drain(m, budget, list.append(acc, more))
+    }
+  }
+}
+
+/// Splitting work into budgets of any size and resuming until settled is
+/// observationally the same as one unbounded step.
+pub fn any_budget_split_agrees_with_an_unbounded_step_test() {
+  use #(commands, input, budget) <- qcheck.given(qcheck.tuple3(
+    commands_gen(),
+    input_gen(),
+    qcheck.bounded_int(1, 4),
+  ))
+  let #(_, start) = run(workhorse(), commands)
+  let #(whole, settled) = machine.step(start, input)
+  let #(first, partial) = machine.step_with_budget(start, input, budget)
+  let #(rest, resumed) = drain(partial, budget, [])
+  assert list.append(first, rest) == whole
+  assert observe(resumed) == observe(settled)
+}
+
+pub fn begin_is_idempotent_test() {
+  use commands <- qcheck.given(commands_gen())
+  let #(_, m) = run(workhorse(), commands)
+  let #(_, once) = machine.begin(m)
+  let #(again, twice) = machine.begin(once)
+  assert again == []
+  assert observe(twice) == observe(once)
+}
+
+/// On a settled machine, advancing by zero is the identity, and a negative
+/// advance is the same as a zero one.
+pub fn non_positive_advances_are_identities_test() {
+  use #(commands, negative) <- qcheck.given(qcheck.tuple2(
+    commands_gen(),
+    qcheck.bounded_int(-100, -1),
+  ))
+  let #(_, m) = run(workhorse(), commands)
+  let #(_, m) = machine.begin(m)
+  let #(zero_effects, zero) = machine.advance_time(m, 0)
+  let #(negative_effects, backwards) = machine.advance_time(m, negative)
+  assert zero_effects == []
+  assert observe(zero) == observe(m)
+  assert negative_effects == zero_effects
+  assert observe(backwards) == observe(zero)
+}
+
+pub fn stopped_machine_ignores_every_driver_test() {
+  use #(commands, budget) <- qcheck.given(qcheck.tuple2(
+    commands_gen(),
+    qcheck.bounded_int(0, 4),
+  ))
+  let #(_, stopped) =
+    run(workhorse(), list.append(commands, [Deliver(machine.Cast(-1))]))
+  let #(begin_effects, after_begin) = machine.begin(stopped)
+  let #(resume_effects, after_resume) = machine.resume(stopped, budget)
+  let #(advance_effects, after_advance) = machine.advance_time(stopped, 50)
+  assert begin_effects == []
+  assert resume_effects == []
+  assert advance_effects == []
+  assert observe(after_begin) == observe(stopped)
+  assert observe(after_resume) == observe(stopped)
+  assert observe(after_advance) == observe(stopped)
+}

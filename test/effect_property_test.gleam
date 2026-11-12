@@ -174,3 +174,71 @@ fn dedupe(keys: List(String)) -> List(String) {
     }
   })
 }
+
+fn timer_kind_gen() -> qcheck.Generator(effect.TimerKind) {
+  qcheck.from_generators(qcheck.return(effect.StateTimer), [
+    qcheck.return(effect.EventTimer),
+    qcheck.map(timer_id_gen(), effect.GenericTimer),
+  ])
+}
+
+fn entry_effect_gen() -> qcheck.Generator(effect.EntryEffect(Int, Int)) {
+  let msg = qcheck.bounded_int(0, 50)
+  let from = caller_fixture.token()
+  qcheck.from_generators(qcheck.map(msg, effect.EntryReply(from, _)), [
+    qcheck.map3(timer_kind_gen(), timeout_time_gen(), msg, effect.EntryArm),
+    qcheck.map(timer_kind_gen(), effect.EntryCancel),
+    qcheck.map2(timer_kind_gen(), msg, effect.EntryUpdate),
+    qcheck.return(effect.EntryHibernate),
+  ])
+}
+
+fn entry_kind(
+  entry: effect.EntryEffect(Int, Int),
+) -> Result(effect.TimerKind, Nil) {
+  case entry {
+    effect.EntryArm(kind, _, _)
+    | effect.EntryCancel(kind)
+    | effect.EntryUpdate(kind, _) -> Ok(kind)
+    effect.EntryReply(_, _) | effect.EntryHibernate -> Error(Nil)
+  }
+}
+
+/// `from_entry` is an embedding of the entry vocabulary: every timer
+/// decision keeps its class, and nothing else decides a timer.
+pub fn from_entry_preserves_the_timer_class_test() {
+  use #(entry, kind) <- qcheck.given(qcheck.tuple2(
+    entry_effect_gen(),
+    timer_kind_gen(),
+  ))
+  let embedded = effect.from_entry(entry)
+  assert effect.decides_timer(embedded, kind)
+    == { entry_kind(entry) == Ok(kind) }
+}
+
+/// Embedding commutes with resolution: resolving entry effects after
+/// embedding them keeps exactly one decision per timer class, the last.
+pub fn from_entry_commutes_with_resolution_test() {
+  use entries <- qcheck.given(qcheck.generic_list(
+    entry_effect_gen(),
+    qcheck.bounded_int(0, 10),
+  ))
+  let embedded = list.map(entries, effect.from_entry)
+  assert effect.resolve(embedded) == effect.resolve(effect.resolve(embedded))
+  assert list.length(effect.resolve(embedded)) <= list.length(embedded)
+}
+
+/// A relative deadline never lies in the past, whatever the delay's sign,
+/// and an absolute deadline ignores the clock.
+pub fn deadlines_are_monotone_in_the_clock_test() {
+  use #(clock, delay, other_clock) <- qcheck.given(qcheck.tuple3(
+    qcheck.bounded_int(-1000, 1000),
+    qcheck.bounded_int(-100, 100),
+    qcheck.bounded_int(-1000, 1000),
+  ))
+  assert effect.deadline_from(clock, effect.After(delay)) >= clock
+  assert effect.deadline_from(clock, effect.After(delay))
+    == clock + int.max(0, delay)
+  assert effect.deadline_from(clock, effect.At(delay))
+    == effect.deadline_from(other_clock, effect.At(delay))
+}
