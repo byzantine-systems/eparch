@@ -26,8 +26,9 @@
 //// - any delivered input cancels the *event* timer;
 //// - arming or updating a timer with zero or elapsed time enqueues its
 ////   `Timeout` input as the newest event (after inserted and postponed
-////   ones), and a zero *event* timer is only enqueued when the queue is
-////   empty;
+////   ones), and a zero *event* timer is only enqueued when no inserted,
+////   postponed or delivered input is waiting (other pending zero timeouts
+////   do not count, matching `gen_statem`'s separate time-out-zero queue);
 //// - canceling a timer also discards its not-yet-delivered `Timeout` input.
 ////
 //// ## Laws
@@ -637,9 +638,13 @@ fn arm_timer(
   let machine = cancel_timer(machine, kind)
   case deadline <= machine.clock {
     True ->
-      case kind, machine.queue {
-        effect.EventTimer, [_, ..] -> machine
-        effect.EventTimer, []
+      // gen_statem keeps zero-time timeouts in their own queue, behind
+      // inserted and postponed events, and any handled event cancels the
+      // event timer. A zero event timer therefore survives only when no
+      // such event is waiting; pending zero timeouts do not count.
+      case kind, events_waiting(machine) {
+        effect.EventTimer, True -> machine
+        effect.EventTimer, False
         | effect.StateTimer, _
         | effect.GenericTimer(_), _
         -> enqueue_newest(machine, Timeout(kind, content), Some(kind))
@@ -659,6 +664,10 @@ fn arm_timer(
       )
     }
   }
+}
+
+fn events_waiting(machine: Machine(state, data, msg, reply)) -> Bool {
+  list.any(machine.queue, fn(queued) { queued.from_timer == None })
 }
 
 fn cancel_timer(

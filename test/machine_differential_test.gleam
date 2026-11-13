@@ -295,3 +295,31 @@ pub fn otp_interprets_every_effect_list_like_the_logical_machine_test() {
   // Same-sender ordering makes this call a fence after the external casts.
   assert state_machine.call(server.ref, Snapshot, waiting: 1000) == Ok(expected)
 }
+
+/// Minimised counterexample the law found: a pending zero *state* timeout
+/// must not suppress a zero *event* timeout requested after it, because
+/// gen_statem queues zero timeouts separately from inserted and postponed
+/// events.
+pub fn pending_zero_timeouts_do_not_suppress_a_zero_event_timeout_test() {
+  let script = [
+    Run(Keep, [ArmNow(EventKind, 0), ArmNow(StateKind, 0), PostponeThis]),
+    Run(Change, [Update(StateKind, 0)]),
+  ]
+  let assert Ok(server) =
+    otp.builder(phase: False, data: [], handler: handle, on_enter: Some(enter))
+    |> state_machine.start
+  let #(_, model) =
+    machine.new(phase: False, data: [], handler: handle)
+    |> machine.with_state_enter(enter)
+    |> machine.begin
+  let model =
+    list.fold(script, model, fn(model, message) {
+      state_machine.cast(server.ref, message)
+      machine.step(model, machine.Cast(message)).1
+    })
+  let #(effects, _) =
+    machine.step(model, machine.Call(caller_fixture.token_for([]), Snapshot))
+  let assert [effect.Reply(_, expected)] = effects
+  assert list.contains(expected, "event:0")
+  assert state_machine.call(server.ref, Snapshot, waiting: 1000) == Ok(expected)
+}
