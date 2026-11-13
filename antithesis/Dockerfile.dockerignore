@@ -4,8 +4,12 @@
 !src/
 !src/**
 src/**/_build/
+!dev/
+!dev/**
 !antithesis/
-!antithesis/driver.py
-!antithesis/probe.erl
+!antithesis/pyproject.toml
+!antithesis/README.md
+!antithesis/src/
+!antithesis/src/**
 !antithesis/templates/
 !antithesis/templates/**

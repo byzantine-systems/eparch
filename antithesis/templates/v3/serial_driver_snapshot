@@ -1,2 +1,2 @@
 #!/bin/sh
-exec /opt/sdk/bin/python /opt/antithesis/catalog/driver.py "$@"
+exec /opt/sdk/bin/eparch-antithesis broadcast

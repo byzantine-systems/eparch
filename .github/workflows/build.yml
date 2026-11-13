@@ -40,3 +40,11 @@ jobs:
       - name: "[Gleam] Check if all examples still work"
         run: |
           nix develop --impure --command make
+
+      - name: "[Antithesis] Test and type-check the driver"
+        run: |
+          nix develop --impure --command make antithesis-check
+
+      - name: "[Antithesis] Smoke-run the workload scenarios"
+        run: |
+          nix develop --impure --command make antithesis-smoke

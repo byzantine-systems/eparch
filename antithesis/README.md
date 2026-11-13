@@ -1,12 +1,46 @@
-# Broadcast workload
+# Antithesis workload
 
-Run from the repository root in the project devenv:
+The scenarios and their oracle are Gleam code in `dev/eparch/workload`,
+type-checked against the public API and run by `gleam test`
+(`test/workload_test.gleam`) as ordinary properties:
+
+- `broadcast`: one event manager with worker actors. `normal` checks the
+  snapshot and admission claims; `kill` kills the manager mid-confirmation
+  and checks every client result.
+- `statem`: the logical machine and `gen_statem` must deliver the same
+  trace for a seeded script, postponed inputs must be redelivered in FIFO
+  order, and failed starts must leave the caller's mailbox empty.
+
+`dev/eparch_dev.gleam` prints one `EPARCH {json}` verdict per evaluated
+property.
+
+## Driver (`eparch-antithesis`)
+
+This directory is also a small uv project. Its `eparch-antithesis` command
+runs one bounded BEAM per Antithesis test command, parses the verdicts into
+typed values, and reports each through the Antithesis SDK assertion of the
+same name (`always` or `sometimes`). Antithesis supplies the randomness.
+
+The repository devenv provides Python 3.14, uv and pyrefly, and syncs this
+project's virtual environment (dev group included) on shell entry. From the
+repository root:
 
 ```sh
-gleam build --warnings-as-errors
-out=$(mktemp -d)
-erlc -Werror -o "$out" antithesis/probe.erl
-EPARCH_EBIN='build/dev/erlang/*/ebin' PROBE_EBIN="$out" python3 antithesis/driver.py --smoke
+make antithesis-smoke   # every scenario, no SDK or container needed
+make antithesis-check   # pytest + pyrefly for the driver itself
 ```
 
-The smoke run checks the same receipt trace as the hosted test and requires a completed witness. It needs Erlang/OTP 27+ (`json:encode/1`) and Python 3, but no SDK or container. The image and config under this directory are deployment inputs for the Antithesis test template. The SDK reports safety and reachability separately in that environment.
+The smoke run fails if any `always` verdict fails or any `sometimes`
+verdict is never witnessed. CI runs both targets. A single scenario can be
+run with `gleam dev -- broadcast 8 kill` or `gleam dev -- statem 42`.
+
+## Deployment
+
+Hosted Antithesis runs container images: `Dockerfile` builds the workload
+image (Gleam dev build plus this package installed into `/opt/sdk`), and
+`config/` holds the compose file the test template uses. The image installs
+the package with pip from `pyproject.toml`, so only the SDK pin applies there,
+not `uv.lock`.
+
+The research notes in `scratchbook/` are local working files and are not
+committed.

@@ -28,3 +28,11 @@ examples/*/manifest.toml
 
 # Extra
 .env
+
+# Python (antithesis/ driver project)
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# Local Antithesis research notes, never committed
+antithesis/scratchbook/
