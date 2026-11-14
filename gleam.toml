@@ -1,5 +1,5 @@
 name = "eparch"
-version = "2.0.0"
+version = "3.0.0"
 target = "erlang"
 
 description = "Typed OTP state machines, a logical-clock interpreter, and actor-based broadcast handlers for Gleam"
