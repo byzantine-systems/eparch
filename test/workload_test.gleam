@@ -6,6 +6,7 @@
 ////
 
 import eparch/workload/broadcast
+import eparch/workload/cluster
 import eparch/workload/statem
 import eparch/workload/verdict
 import gleam/list
@@ -56,4 +57,22 @@ pub fn statem_sometimes_verdicts_are_reachable_test() {
       statem.verdicts(statem.run(seed))
     })
   assert witnessed(runs, "A generated script fires a zero event timeout")
+}
+
+pub fn cluster_always_verdicts_hold_test() {
+  use seed <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(5),
+    qcheck.bounded_int(0, 1_000_000),
+  )
+  assert verdict.violations(cluster.verdicts(cluster.run(seed))) == []
+}
+
+pub fn cluster_sometimes_verdicts_are_reachable_test() {
+  // Seeds 2 and 10 together witness every cluster `sometimes` claim.
+  let runs = list.map([2, 10], fn(seed) { cluster.verdicts(cluster.run(seed)) })
+  assert witnessed(runs, "A cross-node call succeeds")
+  assert witnessed(runs, "A cross-node call times out")
+  assert witnessed(runs, "A call to an isolated node's global server fails")
+  assert witnessed(runs, "A reachable remote manager confirms a publication")
+  assert witnessed(runs, "A live but unreachable manager is reported down")
 }

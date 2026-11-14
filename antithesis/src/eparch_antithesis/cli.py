@@ -1,6 +1,6 @@
-"""Command line: `eparch-antithesis {broadcast,statem,smoke}`.
+"""Command line: `eparch-antithesis {broadcast,statem,cluster,smoke}`.
 
-`broadcast` and `statem` are Antithesis test commands: Antithesis supplies
+`broadcast`, `statem` and `cluster` are Antithesis test commands: Antithesis supplies
 the randomness and the SDK records each verdict. `smoke` runs everything
 locally and exits non-zero on any failure.
 """
@@ -12,7 +12,7 @@ from typing import Any
 
 from eparch_antithesis import smoke, workload
 from eparch_antithesis.verdicts import Verdict
-from eparch_antithesis.workload import Broadcast, Scenario, Statem
+from eparch_antithesis.workload import Broadcast, Cluster, Scenario, Statem
 
 BURSTS = (1, 2, 4, 8, 16)
 
@@ -38,6 +38,8 @@ def antithesis_scenario(name: str) -> Scenario:
                 burst=random_choice(list(BURSTS)),
                 mode=random_choice(["normal", "kill"]),
             )
+        case "cluster":
+            return Cluster(seed=get_random() % 2**31)
         case _:
             return Statem(seed=get_random() % 2**31)
 
@@ -63,7 +65,7 @@ def run_smoke() -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="eparch-antithesis", description=__doc__)
-    parser.add_argument("command", choices=["broadcast", "statem", "smoke"])
+    parser.add_argument("command", choices=["broadcast", "statem", "cluster", "smoke"])
     args = parser.parse_args(argv)
     if args.command == "smoke":
         return run_smoke()

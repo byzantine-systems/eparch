@@ -30,7 +30,12 @@ class Statem:
     seed: int
 
 
-type Scenario = Broadcast | Statem
+@dataclass(frozen=True, slots=True)
+class Cluster:
+    seed: int
+
+
+type Scenario = Broadcast | Statem | Cluster
 
 
 def arguments(scenario: Scenario) -> list[str]:
@@ -40,6 +45,8 @@ def arguments(scenario: Scenario) -> list[str]:
             return ["broadcast", str(burst), mode]
         case Statem(seed=seed):
             return ["statem", str(seed)]
+        case Cluster(seed=seed):
+            return ["cluster", str(seed)]
 
 
 class WorkloadError(RuntimeError):

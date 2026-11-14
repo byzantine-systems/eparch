@@ -105,8 +105,8 @@
             programs.erlfmt.enable = true;
             programs.gleam.enable = true;
             programs.nixfmt.enable = true;
-            programs.ruff-format.enable = true;
             programs.ruff-check.enable = true;
+            programs.ruff-format.enable = true;
           };
 
           devenv.shells.default =

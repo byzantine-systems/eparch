@@ -13,7 +13,7 @@ from eparch_antithesis.verdicts import (
     parse_verdict,
     verdict_lines,
 )
-from eparch_antithesis.workload import Broadcast, Statem, arguments
+from eparch_antithesis.workload import Broadcast, Cluster, Statem, arguments
 
 
 def line(kind: str, message: str, holds: bool, details: str = "") -> str:
@@ -53,6 +53,7 @@ def test_malformed_verdicts_are_rejected(payload: str) -> None:
 def test_scenarios_render_the_dev_entry_point_vocabulary() -> None:
     assert arguments(Broadcast(burst=8, mode="kill")) == ["broadcast", "8", "kill"]
     assert arguments(Statem(seed=42)) == ["statem", "42"]
+    assert arguments(Cluster(seed=7)) == ["cluster", "7"]
     with pytest.raises(ValueError, match="burst"):
         Broadcast(burst=17, mode="normal")
 

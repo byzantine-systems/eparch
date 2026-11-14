@@ -8,12 +8,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from eparch_antithesis.verdicts import Verdict
-from eparch_antithesis.workload import Broadcast, Scenario, Statem
+from eparch_antithesis.workload import Broadcast, Cluster, Scenario, Statem
 
 SCENARIOS: tuple[Scenario, ...] = (
     Broadcast(burst=8, mode="normal"),
     Broadcast(burst=8, mode="kill"),
     *(Statem(seed=seed) for seed in range(1, 11)),
+    # Together these witness every cluster `sometimes` claim.
+    Cluster(seed=2),
+    Cluster(seed=10),
 )
 
 

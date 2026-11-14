@@ -10,6 +10,11 @@ type-checked against the public API and run by `gleam test`
 - `statem`: the logical machine and `gen_statem` must deliver the same
   trace for a seeded script, postponed inputs must be redelivered in FIFO
   order, and failed starts must leave the caller's mailbox empty.
+- `cluster`: three loopback `peer` nodes. A client calls a `Global` state
+  machine on one host and publishes to an event manager on the other,
+  under seeded partitions and kills. Checks reply integrity, at-most-once
+  effects, no late replies, and how unreachable or dead managers are
+  reported. Needs OTP 25+.
 
 `dev/eparch_dev.gleam` prints one `EPARCH {json}` verdict per evaluated
 property.
@@ -32,7 +37,8 @@ make antithesis-check   # pytest + pyrefly for the driver itself
 
 The smoke run fails if any `always` verdict fails or any `sometimes`
 verdict is never witnessed. CI runs both targets. A single scenario can be
-run with `gleam dev -- broadcast 8 kill` or `gleam dev -- statem 42`.
+run with `gleam dev -- broadcast 8 kill`, `gleam dev -- statem 42` or
+`gleam dev -- cluster 42`.
 
 ## Deployment
 

@@ -4,6 +4,7 @@
 //// gleam dev -- broadcast 8 normal
 //// gleam dev -- broadcast 8 kill
 //// gleam dev -- statem 42
+//// gleam dev -- cluster 42
 //// ```
 ////
 //// Each evaluated property is printed as one `EPARCH {json}` line; the
@@ -11,15 +12,18 @@
 //// fixed vocabulary and are parsed, never turned into atoms.
 
 import eparch/workload/broadcast
+import eparch/workload/cluster
 import eparch/workload/statem
 import eparch/workload/verdict.{type Verdict}
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/result
 
 type Scenario {
   Broadcast(burst: Int, mode: broadcast.Mode)
   Statem(seed: Int)
+  Cluster(seed: Int)
 }
 
 @external(erlang, "eparch_workload_ffi", "plain_arguments")
@@ -38,7 +42,7 @@ pub fn main() -> Nil {
     }
     Error(Nil) -> {
       io.println_error(
-        "usage: broadcast <burst 1..16> <normal|kill> | statem <seed>",
+        "usage: broadcast <burst 1..16> <normal|kill> | statem <seed> | cluster <seed>",
       )
       halt(2)
     }
@@ -59,11 +63,8 @@ fn parse(arguments: List(String)) -> Result(Scenario, Nil) {
         _, _ -> Error(Nil)
       }
     }
-    ["statem", seed] ->
-      case int.parse(seed) {
-        Ok(seed) -> Ok(Statem(seed))
-        Error(Nil) -> Error(Nil)
-      }
+    ["statem", seed] -> int.parse(seed) |> result.map(Statem)
+    ["cluster", seed] -> int.parse(seed) |> result.map(Cluster)
     _ -> Error(Nil)
   }
 }
@@ -72,5 +73,6 @@ fn run(scenario: Scenario) -> List(Verdict) {
   case scenario {
     Broadcast(burst, mode) -> broadcast.verdicts(broadcast.run(burst, mode))
     Statem(seed) -> statem.verdicts(statem.run(seed))
+    Cluster(seed) -> cluster.verdicts(cluster.run(seed))
   }
 }
