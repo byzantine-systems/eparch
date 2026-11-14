@@ -5,8 +5,12 @@
 //// callbacks that decide what a transition does. Nothing here owns a
 //// process. You drive it explicitly with `step` (deliver one input) and
 //// `advance_time` (move the logical clock), which makes whole execution
-//// traces testable without spawning anything — the property suite in
+//// traces testable without spawning anything. The property suite in
 //// `test/machine_property_test` relies on exactly that.
+////
+//// This is the recommended way to write a state machine. Run the same
+//// handler in a process with `eparch/machine/otp`, which builds on the
+//// low-level `eparch/state_machine` wrapper.
 ////
 //// ## Semantics
 ////
@@ -37,7 +41,7 @@
 //// generated command scripts:
 ////
 //// - **Trace composition:** running `xs <> ys` in one go agrees with running
-////   `xs`, then running `ys` from the residual machine — same total effects,
+////   `xs`, then running `ys` from the residual machine: same total effects,
 ////   same residual observations.
 //// - **Determinism:** stepping the same machine twice with the same input
 ////   yields the same effects and residual observations.

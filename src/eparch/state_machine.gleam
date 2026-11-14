@@ -1,6 +1,11 @@
 //// A type-safe, OTP-compatible, finite state machine implementation that
 //// leverages Erlang's [gen_statem](https://www.erlang.org/doc/apps/stdlib/gen_statem.html) behavior through the [Gleam ffi](https://gleam.run/documentation/externals/#Erlang-externals).
 ////
+//// This is eparch's low-level layer: a thin typed wrapper exposing all of
+//// `gen_statem` for you to build on however you want. To write a state
+//// machine you can also unit test without a process, start with
+//// `eparch/machine`; `eparch/machine/otp` runs its handlers on this module.
+////
 //// ## Differences from `gen_statem`
 ////
 //// Unlike Erlang's `gen_statem`, this implementation:
