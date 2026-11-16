@@ -39,7 +39,7 @@ jobs:
 
       - name: "[Gleam] Check if all examples still work"
         run: |
-          nix develop --impure --command make
+          nix develop --impure --command make -j"$(nproc)" --output-sync=target
 
       - name: "[Antithesis] Test and type-check the driver"
         run: |
