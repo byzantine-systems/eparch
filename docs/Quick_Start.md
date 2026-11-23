@@ -8,7 +8,7 @@ The `eparch/state_machine` module wraps `gen_statem` with a type-safe API. Defin
 import eparch/state_machine as sm
 import gleam/erlang/process
 
-type State { Off | On }
+type State { Off On }
 
 type Msg {
   Push
@@ -35,7 +35,7 @@ pub fn start() {
     |> sm.on_event(handle_event)
     |> sm.start
 
-  machine.data  // Subject(Msg)
+  sm.ref_to_subject(machine.ref)
 }
 ```
 
@@ -74,7 +74,7 @@ sm.new(initial_state: Locked, initial_data: data)
 fn handle_event(event, state, data) {
   case event, state {
     // ...
-    sm.Enter(_), Open -> sm.keep_state(data, [sm.StateTimeout(5000)])
+    sm.Enter(_), Open -> sm.keep_state(data, [sm.StateTimeout(sm.After(5000), Lock)])
     // ...
   }
 }
@@ -87,14 +87,15 @@ Create a manager, attach handlers, and broadcast events:
 ```gleam
 import eparch/event_manager
 import gleam/erlang/process
+import gleam/option.{None}
 
-type LogEvent { LogLine(String) | Flush(process.Subject(Nil)) }
+type LogEvent { LogLine(String) Flush(process.Subject(Nil)) }
 
 pub fn main() {
-  let assert Ok(mgr) = event_manager.start()
+  let assert Ok(mgr) = event_manager.start_link(event_manager.new_start_options())
 
   let handler =
-    event_manager.new_handler(initial_state: 0, on_event: fn(event, count) {
+    event_manager.new_handler(0, fn(event, count) {
       case event {
         LogLine(_) -> event_manager.Continue(count + 1)
         Flush(reply) -> {
@@ -104,9 +105,10 @@ pub fn main() {
       }
     })
 
-  let assert Ok(_ref) = event_manager.add_handler(mgr, handler)
+  let assert Ok(_ref) = event_manager.add_handler(mgr, handler, on_down: None)
 
   event_manager.notify(mgr, LogLine("hello"))      // async
-  event_manager.sync_notify(mgr, LogLine("world")) // blocks until processed
+  let assert event_manager.Confirmed = event_manager.sync_notify(mgr, LogLine("world"), 1000)
+  event_manager.stop(mgr, 1000)
 }
 ```

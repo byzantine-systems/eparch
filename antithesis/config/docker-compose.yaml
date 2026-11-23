@@ -1,0 +1,4 @@
+services:
+  workload:
+    image: ${EPARCH_IMAGE:-eparch-antithesis:v3}
+    network_mode: none

@@ -1,6 +1,11 @@
 //// A type-safe, OTP-compatible, finite state machine implementation that
 //// leverages Erlang's [gen_statem](https://www.erlang.org/doc/apps/stdlib/gen_statem.html) behavior through the [Gleam ffi](https://gleam.run/documentation/externals/#Erlang-externals).
 ////
+//// This is eparch's low-level layer: a thin typed wrapper exposing all of
+//// `gen_statem` for you to build on however you want. To write a state
+//// machine you can also unit test without a process, start with
+//// `eparch/machine`; `eparch/machine/otp` runs its handlers on this module.
+////
 //// ## Differences from `gen_statem`
 ////
 //// Unlike Erlang's `gen_statem`, this implementation:
@@ -48,7 +53,11 @@ pub type ServerName(message) {
 /// `Subject(message)` so that `process.send`, `state_machine.send`, and
 /// `state_machine.call` can be used as well.
 ///
-pub type ServerRef(message)
+/// The two parameters describe the whole machine protocol. A registered
+/// name must continue to denote that protocol if it is rebound. Erlang
+/// callers bypass Gleam's type checks and must honour the same contract.
+///
+pub type ServerRef(message, reply)
 
 /// A builder for configuring a state machine before starting it.
 ///
@@ -94,23 +103,12 @@ pub type Status(state, data, message, reply) {
   Status(
     state: state,
     data: data,
-    reason: Option(StopReason),
+    reason: Option(ExitReason),
     queue: List(QueuedEvent(message, reply)),
     postponed: List(QueuedEvent(message, reply)),
     timeouts: List(ActiveTimeout(message)),
     log: List(Dynamic),
   )
-}
-
-/// Termination reason as seen by `format_status/1`.
-///
-/// `Exit` wraps a recognised `process.ExitReason`. `RawReason` is a fallback
-/// for reasons the FFI cannot classify (e.g. `{shutdown, _}`, `{noproc, _}`,
-/// arbitrary user terms) so callers can still inspect or replace them.
-///
-pub type StopReason {
-  Exit(reason: ExitReason)
-  RawReason(term: Dynamic)
 }
 
 /// A pending event on the gen_statem queue or in the postponed list.
@@ -124,6 +122,7 @@ pub type QueuedEvent(message, reply) {
   QueuedCall(from: From(reply), message: message)
   QueuedCast(message: message)
   QueuedInfo(message: message)
+  QueuedRawInfo(term: Dynamic)
   QueuedInternal(message: message)
   QueuedStateTimeout(content: message)
   QueuedEventTimeout(content: message)
@@ -145,10 +144,8 @@ pub type ActiveTimeout(message) {
 
 /// Events that a state machine can receive.
 ///
-/// This unifies the three types of messages in OTP:
-/// - Calls (synchronous, requires reply)
-/// - Casts (asynchronous / fire-and-forget)
-/// - Info (other messages, from selectors/monitors)
+/// Calls, casts, Subject messages and internal events carry the machine's
+/// message type. Other mailbox traffic crosses the boundary as `Dynamic`.
 ///
 pub type Event(state, message, reply) {
   /// A synchronous call that expects a reply
@@ -157,8 +154,14 @@ pub type Event(state, message, reply) {
   /// An asynchronous cast (fire-and-forget)
   Cast(message: message)
 
-  /// An info message (from selectors, monitors, etc)
+  /// Delivered through this machine's Subject or inserted with `InfoEvent`.
   Info(message: message)
+
+  /// An untagged mailbox message, e.g. a monitor notification. Decode before use.
+  RawInfo(term: Dynamic)
+
+  /// An inserted `InternalEvent`, distinct from an external cast.
+  Internal(message: message)
 
   /// Internal event fired when entering a state (if state_enter enabled)
   /// Contains the previous state
@@ -195,9 +198,8 @@ pub type Step(state, data, message, reply) {
   /// Stop the state machine
   Stop(reason: ExitReason)
 
-  /// Stop the state machine and atomically send replies to pending callers.
-  /// Only `Reply(from, response)` actions are valid in the replies list.
-  StopAndReply(reason: ExitReason, replies: List(Action(message, reply)))
+  /// Send these replies before terminating. No other actions are legal here.
+  StopAndReply(reason: ExitReason, replies: List(#(From(reply), reply)))
 }
 
 /// Actions (side effects) to perform after handling an event.
@@ -211,13 +213,13 @@ pub type Action(message, reply) {
   /// Postpone this event until after a state change
   Postpone
 
-  /// Insert a new event at the front of the queue
-  /// Inject a synthetic event of any kind that gen_statem accepts.
-  /// Mirrors gen_statem:event_type/0.
+  /// Insert an event ahead of queued events. Multiple insertions are
+  /// delivered in list order. Not legal during a state-entry callback.
   NextEvent(event_type: NextEventType(reply), content: message)
 
   /// Set a state timeout (canceled on state change). `content` is delivered
-  /// as the `Timeout` event payload when the timer fires.
+  /// as the `Timeout` event payload when the timer fires. A negative
+  /// `After` delay fires immediately.
   StateTimeout(time: TimeoutTime, content: message)
 
   /// Set an event timeout, the unnamed `timeout()` action from gen_statem.
@@ -294,8 +296,7 @@ pub type TimeoutTime {
   At(monotonic_milliseconds: Int)
 }
 
-/// Mirrors gen_statem's event_type/0 so a single NextEvent can inject any
-/// kind of synthetic event into the state machine.
+/// Event types supported by the `NextEvent` action.
 /// https://www.erlang.org/doc/apps/stdlib/gen_statem.html#t:event_type/0
 pub type NextEventType(reply) {
   /// Delivered as an internal event
@@ -317,40 +318,43 @@ pub type NextEventType(reply) {
 pub type From(reply)
 
 /// Data returned when a state machine starts successfully.
-pub type Started(message) {
+pub type Started(message, reply) {
   Started(
     /// The process identifier of the started state machine.
     pid: Pid,
     /// Opaque handle suitable for `cast`, `send_request`, etc. For unnamed
     /// and `Local`-named starts, also convertible to a `Subject(message)`
     /// via `ref_to_subject`.
-    ref: ServerRef(message),
+    ref: ServerRef(message, reply),
   )
 }
 
 /// Data returned by `start_monitor`: a started machine plus the OTP-23+
 /// atomic monitor for it.
-pub type MonitoredMachine(message) {
-  MonitoredMachine(pid: Pid, ref: ServerRef(message), monitor: Monitor)
+pub type MonitoredMachine(message, reply) {
+  MonitoredMachine(pid: Pid, ref: ServerRef(message, reply), monitor: Monitor)
 }
 
 /// Errors that can occur when starting a state machine.
 pub type StartError {
+  /// `init/1` did not finish within the builder's timeout.
   InitTimeout
-  InitFailed(String)
-  InitExited(ExitReason)
+  /// The process started but never handed back its `ServerRef`.
+  InitFailed(reason: String)
+  /// The process exited before initialisation completed.
+  InitExited(reason: ExitReason)
   /// The requested name was already registered to another process.
   AlreadyStarted(pid: Pid)
 }
 
 /// Convenience type for start results.
-pub type StartResult(message) =
-  Result(Started(message), StartError)
+pub type StartResult(message, reply) =
+  Result(Started(message, reply), StartError)
 
 /// An opaque request ID returned by `send_request`.
 ///
-/// The phantom type `reply` tracks the expected response type at compile time.
-/// Requires Erlang/OTP 25.0 or later.
+/// The reply type comes from the machine's ref. Only the process that sent
+/// the request can collect the reply. Requires Erlang/OTP 23.0 or later.
 ///
 pub type RequestId(reply)
 
@@ -370,13 +374,15 @@ pub type ResponseHandling {
   Keep
 }
 
-/// Reasons `receive_response` and `receive_response_collection` can fail.
+/// Reasons waiting for a single request can fail.
 ///
 pub type ReceiveError {
   /// No reply was received within the timeout.
   ReceiveTimeout
-  /// The server handling the request crashed or went away.
-  RequestCrashed(reason: StopReason)
+  /// The server handling the request crashed or went away. Any reason
+  /// other than `normal` or `killed` arrives as `Abnormal(term)`, including
+  /// `noproc` when no server was found.
+  RequestCrashed(reason: ExitReason)
 }
 
 /// The result of waiting for a response from a `RequestIdCollection`.
@@ -391,13 +397,17 @@ pub type CollectionResponse(reply, label) {
 
   /// One of the requests returned an error (e.g. the server crashed).
   RequestFailed(
-    reason: StopReason,
+    reason: ExitReason,
     label: label,
     remaining: RequestIdCollection(label, reply),
   )
 
-  /// The collection had no pending requests.
+  /// The collection was empty (not merely drained using `Keep`).
   NoRequests
+
+  /// No reply arrived in time. `receive_response_collection` abandons all
+  /// outstanding requests; discard this collection rather than retrying it.
+  CollectionTimeout
 }
 
 /// Create a new state machine builder with initial state and data.
@@ -447,7 +457,7 @@ pub fn new(
 ///     Cast(Increment) -> keep_state(Data(..data, count: data.count + 1), [])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, [])
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
 ///   }
@@ -482,7 +492,7 @@ pub fn on_event(
 ///     Enter(_old) -> keep_state(data, [state_timeout(After(30_000), Tick)])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, [])
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
 ///   }
 /// }
@@ -506,6 +516,15 @@ pub fn with_state_enter(
 /// registration via the `global` module, or `Via(module, term)` for a
 /// custom registry such as `gproc` or `syn`.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.named(state_machine.Local(process.new_name("door")))
+/// |> state_machine.on_event(handle_event)
+/// |> state_machine.start_link
+/// ```
+///
 pub fn named(
   builder: Builder(state, data, message, reply),
   name: ServerName(message),
@@ -515,6 +534,13 @@ pub fn named(
 
 /// Set the initialisation timeout. Forwarded to `gen_statem` as
 /// `{timeout, _}`. Defaults to `Milliseconds(1000)`.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.with_timeout(start_options.Milliseconds(5000))
+/// ```
 ///
 pub fn with_timeout(
   builder: Builder(state, data, message, reply),
@@ -535,6 +561,13 @@ pub fn with_timeout(
 /// This is independent of the per-callback `Hibernate` action, which forces
 /// hibernation immediately after a single callback returns.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.with_hibernate_after(start_options.Milliseconds(30_000))
+/// ```
+///
 pub fn with_hibernate_after(
   builder: Builder(state, data, message, reply),
   timeout: Timeout,
@@ -547,6 +580,13 @@ pub fn with_hibernate_after(
 /// production. File debug logging is rejected by the Erlang FFI because it
 /// cannot safely constrain the destination path.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.with_debug([start_options.DebugLog])
+/// ```
+///
 pub fn with_debug(
   builder: Builder(state, data, message, reply),
   flags: List(DebugFlag),
@@ -558,6 +598,15 @@ pub fn with_debug(
 /// process on start. `link` and `monitor` are not exposed here; they are
 /// determined by the lifecycle entry point used (`start_link`, `start`,
 /// `start_monitor`).
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.new(initial_state: Idle, initial_data: 0)
+/// |> state_machine.with_spawn_options([
+///   start_options.SpawnPriority(start_options.PriorityHigh),
+/// ])
+/// ```
 ///
 pub fn with_spawn_options(
   builder: Builder(state, data, message, reply),
@@ -632,8 +681,8 @@ type LinkMode {
 
 /// Start a state machine process linked to the caller.
 ///
-/// Maps to `gen_statem:start_link/3,4`. Returns a `Started(message)` value
-/// containing the PID and a `ServerRef(message)`. For unnamed and `Local`-
+/// Maps to `gen_statem:start_link/3,4`. Returns a `Started(message, reply)` value
+/// containing the PID and a `ServerRef(message, reply)`. For unnamed and `Local`-
 /// named starts, the ref is convertible to a `Subject(message)` via
 /// `ref_to_subject`.
 ///
@@ -651,7 +700,7 @@ type LinkMode {
 ///
 pub fn start_link(
   builder: Builder(state, data, message, reply),
-) -> StartResult(message) {
+) -> StartResult(message, reply) {
   do_start(Link, builder)
 }
 
@@ -661,22 +710,36 @@ pub fn start_link(
 /// link-based crash propagation, e.g. when the parent will set up its own
 /// monitor or when the machine is started under a custom supervisor.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(machine) =
+///   state_machine.new(initial_state: Idle, initial_data: 0)
+///   |> state_machine.on_event(handle_event)
+///   |> state_machine.start
+/// ```
+///
 pub fn start(
   builder: Builder(state, data, message, reply),
-) -> StartResult(message) {
+) -> StartResult(message, reply) {
   do_start(NoLink, builder)
 }
 
-/// Start a state machine process linked to the caller and atomically return
-/// a monitor for it.
+/// Start an unlinked state machine with an atomic monitor.
+/// Maps to `gen_statem:start_monitor/3,4` (OTP 23.0+).
 ///
-/// Maps to `gen_statem:start_monitor/3,4` (OTP 23.0+). Equivalent to
-/// `start_link` followed by `process.monitor`, but without the race window
-/// between the two calls.
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(state_machine.MonitoredMachine(pid:, ref:, monitor:)) =
+///   state_machine.new(initial_state: Idle, initial_data: 0)
+///   |> state_machine.on_event(handle_event)
+///   |> state_machine.start_monitor
+/// ```
 ///
 pub fn start_monitor(
   builder: Builder(state, data, message, reply),
-) -> Result(MonitoredMachine(message), StartError) {
+) -> Result(MonitoredMachine(message, reply), StartError) {
   do_start_monitor(builder)
 }
 
@@ -684,40 +747,60 @@ pub fn start_monitor(
 fn do_start(
   link_mode: LinkMode,
   builder: Builder(state, data, message, reply),
-) -> StartResult(message)
+) -> StartResult(message, reply)
 
 @external(erlang, "statem_ffi", "do_start_monitor")
 fn do_start_monitor(
   builder: Builder(state, data, message, reply),
-) -> Result(MonitoredMachine(message), StartError)
+) -> Result(MonitoredMachine(message, reply), StartError)
 
-/// Extract the `Subject(message)` underlying a `ServerRef(message)`.
+/// Extract the `Subject(message)` underlying a `ServerRef(message, reply)`.
 ///
 /// Succeeds for refs returned by unnamed starts and `Local`-named starts.
 /// Returns `Error(Nil)` for refs registered through `Global` or `Via`,
 /// because those servers cannot be addressed by a `Subject`: they live
 /// outside the local-atom name table.
 ///
-@external(erlang, "statem_ffi", "ref_to_subject")
-pub fn ref_to_subject(ref: ServerRef(message)) -> Result(Subject(message), Nil)
-
-/// Wrap an existing `Subject(message)` as a `ServerRef(message)`.
+/// ## Example
 ///
-/// Useful when a state machine's subject is already in hand (e.g. captured
-/// during start) and it needs to be passed to a function that expects a
-/// `ServerRef`.
+/// ```gleam
+/// let assert Ok(subject) = state_machine.ref_to_subject(machine.ref)
+/// process.send(subject, Ping)
+/// ```
+///
+@external(erlang, "statem_ffi", "ref_to_subject")
+pub fn ref_to_subject(
+  ref: ServerRef(message, reply),
+) -> Result(Subject(message), Nil)
+
+/// Interop escape hatch: a Subject cannot prove the target machine's reply
+/// type. Prefer retaining the ref returned by start.
+///
+/// ## Example
+///
+/// ```gleam
+/// let ref: state_machine.ServerRef(Msg, Int) =
+///   state_machine.unsafe_ref_from_subject(subject)
+/// ```
 ///
 @external(erlang, "statem_ffi", "ref_from_subject")
-pub fn ref_from_subject(subject: Subject(message)) -> ServerRef(message)
+pub fn unsafe_ref_from_subject(
+  subject: Subject(message),
+) -> ServerRef(message, reply)
 
-/// Wrap a raw `Pid` as a `ServerRef(message)`.
+/// Interop escape hatch: neither the message nor the reply type is checked.
+/// Only use when the pid is known to implement the expected protocol.
 ///
-/// The phantom `message` parameter is unchecked; callers are responsible
-/// for passing the correct type. Use only when the Pid is known to belong
-/// to an eparch state machine handling messages of the expected type.
+/// ## Example
+///
+/// ```gleam
+/// let ref: state_machine.ServerRef(Msg, Int) =
+///   state_machine.unsafe_ref_from_pid(pid)
+/// state_machine.cast(ref, Ping)
+/// ```
 ///
 @external(erlang, "statem_ffi", "ref_from_pid")
-pub fn ref_from_pid(pid: Pid) -> ServerRef(message)
+pub fn unsafe_ref_from_pid(pid: Pid) -> ServerRef(message, reply)
 
 /// Create a NextState step indicating a state transition.
 ///
@@ -755,6 +838,12 @@ pub fn keep_state(
 /// Use instead of `keep_state` when data has not changed, to avoid
 /// an unnecessary copy in the `#gleam_statem` record.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state_and_data([state_machine.postpone()])
+/// ```
+///
 pub fn keep_state_and_data(
   actions: List(Action(message, reply)),
 ) -> Step(state, data, message, reply) {
@@ -764,6 +853,12 @@ pub fn keep_state_and_data(
 /// Re-enter the current state with new data, re-triggering the state_enter
 /// callback if enabled.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.repeat_state(Data(..data, retries: data.retries + 1), [])
+/// ```
+///
 pub fn repeat_state(
   data: data,
   actions: List(Action(message, reply)),
@@ -772,6 +867,12 @@ pub fn repeat_state(
 }
 
 /// Re-enter the current state without changing data.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.repeat_state_and_data([])
+/// ```
 ///
 pub fn repeat_state_and_data(
   actions: List(Action(message, reply)),
@@ -791,13 +892,17 @@ pub fn stop(reason: ExitReason) -> Step(state, data, message, reply) {
   Stop(reason:)
 }
 
-/// Stop the state machine and atomically send replies to pending callers.
+/// Send the given caller/response pairs before terminating.
 ///
-/// Only `Reply(from, response)` actions are valid in the `replies` list.
+/// ## Example
+///
+/// ```gleam
+/// state_machine.stop_and_reply(process.Normal, [#(from, Ok(Nil))])
+/// ```
 ///
 pub fn stop_and_reply(
   reason: ExitReason,
-  replies: List(Action(message, reply)),
+  replies: List(#(From(reply), reply)),
 ) -> Step(state, data, message, reply) {
   StopAndReply(reason: reason, replies: replies)
 }
@@ -821,11 +926,23 @@ pub fn reply(from: From(reply), response: reply) -> Action(message, reply) {
 ///
 /// Postpones the current event until after the next state change.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state_and_data([state_machine.postpone()])
+/// ```
+///
 pub fn postpone() -> Action(message, reply) {
   Postpone
 }
 
 /// Hibernate the process after this callback returns.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [state_machine.hibernate()])
+/// ```
 ///
 pub fn hibernate() -> Action(message, reply) {
   Hibernate
@@ -834,6 +951,14 @@ pub fn hibernate() -> Action(message, reply) {
 /// Create a NextEvent action.
 ///
 /// Inserts a new event at the front of the event queue.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.next_event(state_machine.InternalEvent, Validate),
+/// ])
+/// ```
 ///
 pub fn next_event(
   event_type: NextEventType(reply),
@@ -847,6 +972,14 @@ pub fn next_event(
 /// Sets a timeout that is automatically canceled when the state changes.
 /// `content` is delivered as the `Timeout` event payload when it fires.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.next_state(Open, data, [
+///   state_machine.state_timeout(state_machine.After(5000), AutoLock),
+/// ])
+/// ```
+///
 pub fn state_timeout(
   time: TimeoutTime,
   content: message,
@@ -857,6 +990,14 @@ pub fn state_timeout(
 /// Create an EventTimeout action: gen_statem's unnamed `timeout()`.
 ///
 /// Canceled by any other event arriving in the current state.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.event_timeout(state_machine.After(30_000), Idle),
+/// ])
+/// ```
 ///
 pub fn event_timeout(
   time: TimeoutTime,
@@ -869,6 +1010,14 @@ pub fn event_timeout(
 ///
 /// Sets a named timeout that persists across state changes.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.generic_timeout("heartbeat", state_machine.After(1000), Beat),
+/// ])
+/// ```
+///
 pub fn generic_timeout(
   name: String,
   time: TimeoutTime,
@@ -879,11 +1028,23 @@ pub fn generic_timeout(
 
 /// Cancel the running state timeout before it fires.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [state_machine.cancel_state_timeout()])
+/// ```
+///
 pub fn cancel_state_timeout() -> Action(message, reply) {
   CancelStateTimeout
 }
 
 /// Cancel the running event timeout before it fires.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [state_machine.cancel_event_timeout()])
+/// ```
 ///
 pub fn cancel_event_timeout() -> Action(message, reply) {
   CancelEventTimeout
@@ -891,11 +1052,27 @@ pub fn cancel_event_timeout() -> Action(message, reply) {
 
 /// Cancel a running named generic timeout before it fires.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.cancel_generic_timeout("heartbeat"),
+/// ])
+/// ```
+///
 pub fn cancel_generic_timeout(name: String) -> Action(message, reply) {
   CancelGenericTimeout(name:)
 }
 
 /// Update the payload of the running state timeout without restarting the timer.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.update_state_timeout(AutoLock(attempts: 2)),
+/// ])
+/// ```
 ///
 pub fn update_state_timeout(content: message) -> Action(message, reply) {
   UpdateStateTimeout(content:)
@@ -903,11 +1080,27 @@ pub fn update_state_timeout(content: message) -> Action(message, reply) {
 
 /// Update the payload of the running event timeout without restarting the timer.
 ///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.update_event_timeout(Idle(since: now)),
+/// ])
+/// ```
+///
 pub fn update_event_timeout(content: message) -> Action(message, reply) {
   UpdateEventTimeout(content:)
 }
 
 /// Update the payload of a running named generic timeout without restarting the timer.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.keep_state(data, [
+///   state_machine.update_generic_timeout("heartbeat", Beat(seq: 2)),
+/// ])
+/// ```
 ///
 pub fn update_generic_timeout(
   name: String,
@@ -1004,23 +1197,11 @@ pub fn reply_and_keep(
   KeepState(data:, actions: [Reply(from:, response:)])
 }
 
-/// Send a message to a state machine via `process.send` (arrives as `Info`).
-///
-/// The message is delivered to the handler as `Info(message)`. Use this for
-/// messages sent from processes that are not aware of this library, e.g.
-/// monitors, timers, or plain Erlang processes.
-///
-/// To deliver messages as `Cast(message)` instead, use `cast/2`.
-///
-pub fn send(subject: Subject(message), message: message) -> Nil {
-  process.send(subject, message)
-}
-
 /// Send an asynchronous cast to a state machine (arrives as `Cast`).
 ///
-/// Unlike `send`, which routes messages through `process.send` and delivers
-/// them as `Info(message)`, this function calls `gen_statem:cast` so messages
-/// arrive as `Cast(message)` in the event handler.
+/// Unlike `process.send` on the machine's `Subject` (see `ref_to_subject`),
+/// which delivers `Info(message)`, this function calls `gen_statem:cast` so
+/// messages arrive as `Cast(message)` in the event handler.
 ///
 /// Use `cast` when you want to distinguish machine-level commands from
 /// ambient info messages (monitors, raw Erlang signals, etc.).
@@ -1032,7 +1213,7 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 ///   case event {
 ///     Cast(Increment) -> keep_state(data + 1, [])
 ///     Cast(_) -> keep_state(data, [])
-///     Info(_) -> keep_state(data, []) // ignore ambient noise
+///     Info(_) | RawInfo(_) | Internal(_) -> keep_state(data, [])
 ///     Call(_, _) -> keep_state(data, [])
 ///     Enter(_) -> keep_state(data, [])
 ///     Timeout(_, _) -> keep_state(data, [])
@@ -1041,19 +1222,33 @@ pub fn send(subject: Subject(message), message: message) -> Nil {
 /// ```
 ///
 @external(erlang, "statem_ffi", "cast")
-pub fn cast(ref: ServerRef(message), message: message) -> Nil
+pub fn cast(ref: ServerRef(message, reply), message: message) -> Nil
 
-/// Send a synchronous call and wait for a reply.
+/// Send a synchronous call and wait up to `timeout` milliseconds for the
+/// reply.
 ///
-/// This is a re-export of `process.call` for convenience.
+/// Maps to `gen_statem:call/3`, so the handler receives `Call(from, message)`
+/// and answers with a `Reply(from, value)` action. Works for every kind of
+/// `ServerRef`, including `Global` and `Via` registrations. A negative
+/// timeout means "do not wait".
 ///
+/// Returns `Error(ReceiveTimeout)` when no reply arrives in time (OTP 24+
+/// drops a late reply), and `Error(RequestCrashed(reason))` when the server
+/// is absent or exits before replying.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(count) =
+///   state_machine.call(machine.ref, GetCount, waiting: 1000)
+/// ```
+///
+@external(erlang, "statem_ffi", "call")
 pub fn call(
-  subject: Subject(message),
+  ref: ServerRef(message, reply),
+  message: message,
   waiting timeout: Int,
-  sending make_message: fn(Subject(reply)) -> message,
-) -> reply {
-  process.call(subject, timeout, make_message)
-}
+) -> Result(reply, ReceiveError)
 
 // request-id API (OTP 25.0+)
 
@@ -1063,6 +1258,13 @@ pub fn call(
 /// then receive them through `receive_response_collection`.
 ///
 /// Requires Erlang/OTP 25.0 or later.
+///
+/// ## Example
+///
+/// ```gleam
+/// let collection: state_machine.RequestIdCollection(String, Int) =
+///   state_machine.request_ids_new()
+/// ```
 ///
 @external(erlang, "statem_ffi", "reqids_new")
 pub fn request_ids_new() -> RequestIdCollection(label, reply)
@@ -1074,6 +1276,18 @@ pub fn request_ids_new() -> RequestIdCollection(label, reply)
 ///
 /// Requires Erlang/OTP 25.0 or later.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let request = state_machine.send_request(machine.ref, GetCount)
+/// let collection =
+///   state_machine.request_ids_add(
+///     request_id: request,
+///     label: "count",
+///     to: state_machine.request_ids_new(),
+///   )
+/// ```
+///
 @external(erlang, "statem_ffi", "reqids_add")
 pub fn request_ids_add(
   request_id request_id: RequestId(reply),
@@ -1081,9 +1295,16 @@ pub fn request_ids_add(
   to collection: RequestIdCollection(label, reply),
 ) -> RequestIdCollection(label, reply)
 
-/// Return the number of pending request IDs in a collection.
+/// Return the number of associations, including responses retained with `Keep`.
 ///
 /// Requires Erlang/OTP 25.0 or later.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.request_ids_size(state_machine.request_ids_new())
+/// // -> 0
+/// ```
 ///
 @external(erlang, "statem_ffi", "reqids_size")
 pub fn request_ids_size(collection: RequestIdCollection(label, reply)) -> Int
@@ -1091,6 +1312,13 @@ pub fn request_ids_size(collection: RequestIdCollection(label, reply)) -> Int
 /// Convert a collection to a list of `#(RequestId, label)` pairs.
 ///
 /// Requires Erlang/OTP 25.0 or later.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.request_ids_to_list(collection)
+/// // -> [#(request, "count")]
+/// ```
 ///
 @external(erlang, "statem_ffi", "reqids_to_list")
 pub fn request_ids_to_list(
@@ -1103,8 +1331,7 @@ pub fn request_ids_to_list(
 /// collect the reply. The server receives a `Call(from, message)` event
 /// and must reply with a `Reply(from, value)` action.
 ///
-/// The `reply` type cannot always be inferred, so annotate the binding when
-/// needed: `let request: RequestId(MyReply) = send_request(machine.ref, MyMsg)`
+/// The machine's `ServerRef(message, reply)` determines the reply type.
 ///
 /// ## Example
 ///
@@ -1115,11 +1342,11 @@ pub fn request_ids_to_list(
 /// let assert Ok(count) = state_machine.receive_response(request, 1000)
 /// ```
 ///
-/// Requires Erlang/OTP 25.0 or later.
+/// Requires Erlang/OTP 23.0 or later.
 ///
 @external(erlang, "statem_ffi", "send_request")
 pub fn send_request(
-  ref: ServerRef(message),
+  ref: ServerRef(message, reply),
   message: message,
 ) -> RequestId(reply)
 
@@ -1146,7 +1373,7 @@ pub fn send_request(
 ///
 @external(erlang, "statem_ffi", "send_request_to_collection")
 pub fn send_request_to_collection(
-  ref: ServerRef(message),
+  ref: ServerRef(message, reply),
   message: message,
   label: label,
   to collection: RequestIdCollection(label, reply),
@@ -1156,9 +1383,20 @@ pub fn send_request_to_collection(
 ///
 /// Returns `Ok(reply)` on success, `Error(ReceiveTimeout)` if no reply
 /// arrives in time, or `Error(RequestCrashed(reason))` if the server
-/// terminated before replying.
+/// terminated before replying. A timeout abandons the request. Use
+/// `wait_response_timeout` instead if you intend to wait again.
 ///
-/// Requires Erlang/OTP 25.0 or later.
+/// Requires Erlang/OTP 24.0 or later.
+///
+/// ## Example
+///
+/// ```gleam
+/// let request = state_machine.send_request(machine.ref, GetCount)
+/// case state_machine.receive_response(request, 1000) {
+///   Ok(count) -> count
+///   Error(_) -> 0
+/// }
+/// ```
 ///
 @external(erlang, "statem_ffi", "receive_response")
 pub fn receive_response(
@@ -1169,8 +1407,10 @@ pub fn receive_response(
 /// Wait up to `timeout` milliseconds for any pending reply in a collection.
 ///
 /// Pass `Delete` to remove the matched request from the returned collection,
-/// or `Keep` to retain it. Call this in a loop to drain all responses one by
-/// one.
+/// or `Keep` to retain its association even after the reply is consumed.
+/// On `CollectionTimeout` discard the collection: OTP abandons all remaining
+/// requests. With alias-capable servers (OTP 24+) late replies are dropped;
+/// the server's work is not cancelled.
 ///
 /// ## Example
 ///
@@ -1188,29 +1428,77 @@ pub fn receive_response_collection(
   handling: ResponseHandling,
 ) -> CollectionResponse(reply, label)
 
-/// Stop a running state machine from the client with reason `normal`.
+/// Why `stop_server` or `stop_server_with` could not confirm termination.
+///
+pub type StopError {
+  /// No process was registered under the ref, or its node is down.
+  ServerNotRunning
+  /// The server did not terminate within the timeout.
+  StopTimeout
+  /// The server terminated, but with a different reason than requested.
+  StoppedWith(reason: ExitReason)
+}
+
+/// Stop a running state machine from the client with reason `normal`,
+/// waiting as long as it takes.
+///
+/// Maps to `gen_statem:stop/1`. Works for every kind of `ServerRef`.
+///
+/// ## Example
+///
+/// ```gleam
+/// let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+/// state_machine.stop_server(machine.ref)
+/// // -> Error(ServerNotRunning)
+/// ```
 ///
 @external(erlang, "statem_ffi", "stop_server")
-pub fn stop_server(subject: Subject(message)) -> Nil
+pub fn stop_server(ref: ServerRef(message, reply)) -> Result(Nil, StopError)
 
-/// Stop a running state machine from the client with a custom reason and timeout (ms).
+/// Stop a running state machine with a custom reason, waiting up to
+/// `timeout` milliseconds. Maps to `gen_statem:stop/3`. A negative timeout
+/// means "do not wait".
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.stop_server_with(machine.ref, process.Normal, 1000)
+/// ```
 ///
 @external(erlang, "statem_ffi", "stop_server_with")
 pub fn stop_server_with(
-  subject: Subject(message),
+  ref: ServerRef(message, reply),
   reason: ExitReason,
   timeout: Int,
-) -> Nil
+) -> Result(Nil, StopError)
 
 /// Send a reply to a caller from outside the state machine callback.
 ///
 /// Unlike the `Reply` action (which replies inside the callback), this can
 /// be called from any process that holds a `From` value.
 ///
+/// ## Example
+///
+/// ```gleam
+/// // In the handler: stash `from`, keep the call pending.
+/// state_machine.Call(from, Slow) -> {
+///   process.send(worker, Job(from))
+///   state_machine.keep_state_and_data([])
+/// }
+/// // In the worker, later:
+/// state_machine.send_reply(from, result)
+/// ```
+///
 @external(erlang, "statem_ffi", "send_reply")
 pub fn send_reply(from: From(reply), response: reply) -> Nil
 
 /// Send multiple replies at once from outside the callback.
+///
+/// ## Example
+///
+/// ```gleam
+/// state_machine.send_replies([#(first, Ok(Nil)), #(second, Ok(Nil))])
+/// ```
 ///
 @external(erlang, "statem_ffi", "send_replies")
 pub fn send_replies(replies: List(#(From(reply), reply))) -> Nil
@@ -1218,6 +1506,13 @@ pub fn send_replies(replies: List(#(From(reply), reply))) -> Nil
 /// Block indefinitely until a reply arrives for a `RequestId`.
 ///
 /// Since OTP 23.
+///
+/// ## Example
+///
+/// ```gleam
+/// let request = state_machine.send_request(machine.ref, GetCount)
+/// let assert Ok(count) = state_machine.wait_response(request)
+/// ```
 ///
 @external(erlang, "statem_ffi", "wait_response")
 pub fn wait_response(
@@ -1230,6 +1525,13 @@ pub fn wait_response(
 ///
 /// Requires Erlang/OTP 24 or later.
 ///
+/// ## Example
+///
+/// ```gleam
+/// let request = state_machine.send_request(machine.ref, GetCount)
+/// let assert Ok(count) = state_machine.receive_response_blocking(request)
+/// ```
+///
 @external(erlang, "statem_ffi", "receive_response_blocking")
 pub fn receive_response_blocking(
   request_id: RequestId(reply),
@@ -1238,6 +1540,18 @@ pub fn receive_response_blocking(
 /// Block until a reply arrives or the timeout (ms) expires.
 ///
 /// Since OTP 23.
+///
+/// ## Example
+///
+/// ```gleam
+/// let request = state_machine.send_request(machine.ref, GetCount)
+/// case state_machine.wait_response_timeout(request, 100) {
+///   Ok(count) -> count
+///   // The request is still valid; wait again later.
+///   Error(state_machine.ReceiveTimeout) -> retry(request)
+///   Error(state_machine.RequestCrashed(_)) -> 0
+/// }
+/// ```
 ///
 @external(erlang, "statem_ffi", "wait_response_timeout")
 pub fn wait_response_timeout(
@@ -1252,6 +1566,19 @@ pub fn wait_response_timeout(
 /// - `Error(ReceiveError)`: the server crashed
 ///
 /// Since OTP 23.
+///
+/// ## Example
+///
+/// ```gleam
+/// let selector =
+///   process.new_selector() |> process.select_other(fn(message) { message })
+/// let assert Ok(message) = process.selector_receive(selector, 1000)
+/// case state_machine.check_response(message, request) {
+///   Ok(Some(reply)) -> handle_reply(reply)
+///   Ok(None) -> handle_other(message)
+///   Error(_) -> handle_crash()
+/// }
+/// ```
 ///
 @external(erlang, "statem_ffi", "check_response")
 pub fn check_response(

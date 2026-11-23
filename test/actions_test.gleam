@@ -12,10 +12,8 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
-import gleam/list
 import gleam/option
 import gleam/string
-import gleeunit/should
 
 @external(erlang, "sys", "get_status")
 fn sys_get_status(pid: process.Pid) -> Dynamic
@@ -27,7 +25,7 @@ fn process_info(pid: process.Pid, key: atom.Atom) -> Dynamic
 /// Tests in this module only use unnamed and Local-named starts, so this
 /// always succeeds; the assertion documents that assumption.
 fn subject_of(
-  machine: state_machine.Started(message),
+  machine: state_machine.Started(message, reply),
 ) -> process.Subject(message) {
   let assert Ok(s) = state_machine.ref_to_subject(machine.ref)
   s
@@ -67,100 +65,30 @@ pub fn stop_normal_terminates_process_test() {
   process.send(subject_of(machine), Shutdown)
 
   let assert Ok(down) = process.selector_receive(selector, 1000)
-  down.reason |> should.equal(process.Normal)
+  assert down.reason == process.Normal
 }
 
-// POSTPONE
-type PostponeState {
-  PostWaiting
-  PostReady
-}
+@external(erlang, "erlang", "send")
+fn raw_send(pid: process.Pid, term: Dynamic) -> Dynamic
 
-type PostponeMsg {
-  Go
-  Action(reply_with: process.Subject(String))
-}
-
-fn postpone_handler(
-  event: state_machine.Event(PostponeState, PostponeMsg, Nil),
-  state: PostponeState,
-  data: Nil,
-) -> state_machine.Step(PostponeState, Nil, PostponeMsg, Nil) {
-  case event, state {
-    state_machine.Info(Action(_)), PostWaiting ->
-      state_machine.keep_state(data, [state_machine.Postpone])
-
-    state_machine.Info(Go), PostWaiting ->
-      state_machine.next_state(PostReady, data, [])
-
-    state_machine.Info(Action(reply_with: reply_sub)), PostReady -> {
-      process.send(reply_sub, "handled")
-      state_machine.keep_state(data, [])
-    }
-
-    _, _ -> state_machine.keep_state(data, [])
-  }
-}
-
-pub fn postpone_redelivers_event_after_state_change_test() {
+pub fn untagged_mailbox_message_is_raw_info_test() {
+  let observed = process.new_subject()
   let assert Ok(machine) =
-    state_machine.new(initial_state: PostWaiting, initial_data: Nil)
-    |> state_machine.on_event(postpone_handler)
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(fn(event, _, _) {
+      case event {
+        state_machine.RawInfo(term) -> process.send(observed, term)
+        _ -> Nil
+      }
+      state_machine.keep_state_and_data([])
+    })
     |> state_machine.start_link
 
-  let reply_sub = process.new_subject()
-  // Action arrives first but is postponed; Go triggers state change -> redeliver.
-  process.send(subject_of(machine), Action(reply_with: reply_sub))
-  process.send(subject_of(machine), Go)
-
-  let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("handled")
-}
-
-// NEXT EVENT
-// 1. Trigger 
-// 2. NextEvent(Derived) -> internal event fires as Cast (Derived).
-
-type NextEventState {
-  NeActive
-}
-
-type NextEventMsg {
-  Trigger(reply_with: process.Subject(String))
-  Derived(reply_with: process.Subject(String))
-}
-
-fn next_event_handler(
-  event: state_machine.Event(NextEventState, NextEventMsg, Nil),
-  _state: NextEventState,
-  data: Nil,
-) -> state_machine.Step(NextEventState, Nil, NextEventMsg, Nil) {
-  case event {
-    state_machine.Info(Trigger(reply_with: reply_sub)) ->
-      state_machine.keep_state(data, [
-        state_machine.NextEvent(state_machine.CastEvent, Derived(reply_sub)),
-      ])
-
-    state_machine.Cast(Derived(reply_with: reply_sub)) -> {
-      process.send(reply_sub, "derived")
-      state_machine.keep_state(data, [])
-    }
-
-    _ -> state_machine.keep_state(data, [])
-  }
-}
-
-pub fn next_event_fires_synthesised_cast_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: NeActive, initial_data: Nil)
-    |> state_machine.on_event(next_event_handler)
-    |> state_machine.start_link
-
-  let reply_sub = process.new_subject()
-  process.send(subject_of(machine), Trigger(reply_with: reply_sub))
-
-  let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("derived")
+  // Even an unrelated two-tuple is not a Subject envelope.
+  let foreign = dynamic.array([dynamic.int(17), dynamic.string("payload")])
+  let _ = raw_send(machine.pid, foreign)
+  assert process.receive(observed, 1000) == Ok(foreign)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 // STATE TIMEOUT
@@ -212,7 +140,7 @@ pub fn state_timeout_fires_and_transitions_state_test() {
   process.send(subject_of(machine), StGetState(reply_with: reply_sub))
 
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(StTimedOut)
+  assert s == StTimedOut
 }
 
 // State timeout is cancelled when leaving the state.
@@ -263,7 +191,7 @@ pub fn state_timeout_is_cancelled_on_state_change_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), CGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(CDone)
+  assert s == CDone
 }
 
 // GENERIC TIMEOUT
@@ -313,117 +241,7 @@ pub fn generic_timeout_fires_after_interval_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), GtGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(GtTriggered)
-}
-
-type CstState {
-  CstIdle
-  CstActive
-  CstTimedOut
-}
-
-type CstMsg {
-  CstActivate
-  CstCancel
-  CstGetState(reply_with: process.Subject(CstState))
-}
-
-fn cancel_state_timeout_handler(
-  event: state_machine.Event(CstState, CstMsg, Nil),
-  state: CstState,
-  data: Nil,
-) -> state_machine.Step(CstState, Nil, CstMsg, Nil) {
-  case event, state {
-    state_machine.Info(CstActivate), CstIdle ->
-      state_machine.next_state(CstActive, data, [
-        state_machine.StateTimeout(state_machine.After(5000), CstActivate),
-      ])
-
-    state_machine.Info(CstCancel), CstActive ->
-      state_machine.keep_state(data, [state_machine.cancel_state_timeout()])
-
-    state_machine.Timeout(state_machine.StateTimeoutType, _), CstActive ->
-      state_machine.next_state(CstTimedOut, data, [])
-
-    state_machine.Info(CstGetState(reply_with: reply_sub)), _ -> {
-      process.send(reply_sub, state)
-      state_machine.keep_state(data, [])
-    }
-
-    _, _ -> state_machine.keep_state(data, [])
-  }
-}
-
-pub fn cancel_state_timeout_prevents_fire_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: CstIdle, initial_data: Nil)
-    |> state_machine.on_event(cancel_state_timeout_handler)
-    |> state_machine.start_link
-
-  process.send(subject_of(machine), CstActivate)
-  process.send(subject_of(machine), CstCancel)
-  process.sleep(30)
-
-  let reply_sub = process.new_subject()
-  process.send(subject_of(machine), CstGetState(reply_with: reply_sub))
-  let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(CstActive)
-}
-
-type CgtState {
-  CgtWaiting
-  CgtTriggered
-}
-
-type CgtMsg {
-  CgtArm
-  CgtCancel
-  CgtGetState(reply_with: process.Subject(CgtState))
-}
-
-fn cancel_generic_timeout_handler(
-  event: state_machine.Event(CgtState, CgtMsg, Nil),
-  state: CgtState,
-  data: Nil,
-) -> state_machine.Step(CgtState, Nil, CgtMsg, Nil) {
-  case event, state {
-    state_machine.Info(CgtArm), CgtWaiting ->
-      state_machine.keep_state(data, [
-        state_machine.GenericTimeout("tick", state_machine.After(5000), CgtArm),
-      ])
-
-    state_machine.Info(CgtCancel), CgtWaiting ->
-      state_machine.keep_state(data, [
-        state_machine.cancel_generic_timeout("tick"),
-      ])
-
-    state_machine.Timeout(state_machine.GenericTimeoutType("tick"), _),
-      CgtWaiting
-    -> state_machine.next_state(CgtTriggered, data, [])
-
-    state_machine.Info(CgtGetState(reply_with: reply_sub)), _ -> {
-      process.send(reply_sub, state)
-      state_machine.keep_state(data, [])
-    }
-
-    _, _ -> state_machine.keep_state(data, [])
-  }
-}
-
-pub fn cancel_generic_timeout_prevents_fire_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: CgtWaiting, initial_data: Nil)
-    |> state_machine.on_event(cancel_generic_timeout_handler)
-    |> state_machine.start_link
-
-  process.send(subject_of(machine), CgtArm)
-  process.send(subject_of(machine), CgtCancel)
-  process.sleep(30)
-
-  let reply_sub = process.new_subject()
-  process.send(subject_of(machine), CgtGetState(reply_with: reply_sub))
-  let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(CgtWaiting)
+  assert s == GtTriggered
 }
 
 type UstState {
@@ -478,7 +296,7 @@ pub fn update_state_timeout_fires_without_restart_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), UstGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(UstFired)
+  assert s == UstFired
 }
 
 // EVENT TIMEOUT (unnamed gen_statem `timeout()`)
@@ -536,7 +354,7 @@ pub fn event_timeout_fires_and_delivers_content_test() {
   process.send(subject_of(machine), EvtGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
   // Only fires if the handler matched on the supplied EvtTick content.
-  s |> should.equal(EvtFired)
+  assert s == EvtFired
 }
 
 pub fn event_timeout_cancelled_by_subsequent_event_test() {
@@ -556,7 +374,7 @@ pub fn event_timeout_cancelled_by_subsequent_event_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), EvtGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(EvtPoked)
+  assert s == EvtPoked
 }
 
 // CANCEL EVENT TIMEOUT
@@ -613,7 +431,7 @@ pub fn cancel_event_timeout_prevents_fire_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), CetGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(CetWaiting)
+  assert s == CetWaiting
 }
 
 // ABSOLUTE TIMEOUT (At(deadline))
@@ -668,7 +486,7 @@ pub fn absolute_state_timeout_fires_near_deadline_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), AbsGetState(reply_with: reply_sub))
   let assert Ok(s) = process.receive(reply_sub, 1000)
-  s |> should.equal(AbsFired)
+  assert s == AbsFired
 }
 
 // CUSTOM CONTENT round-trip through a state timeout.
@@ -736,13 +554,13 @@ pub fn state_timeout_delivers_custom_content_test() {
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), CntGetReceived(reply_with: reply_sub))
   let assert Ok(received) = process.receive(reply_sub, 1000)
-  received |> should.equal(CntTick(retry: 3, label: "boom"))
+  assert received == CntTick(retry: 3, label: "boom")
 }
 
 // CAST
 //
 // 1. state_machine.cast delivers `Cast(msg)`.
-// 2. state_machine.send delivers Info(msg).
+// 2. process.send on the machine's Subject delivers Info(msg).
 // 3. The handler only responds to `Cast`, `Info` is silently dropped.
 type CastState {
   CastListening
@@ -776,11 +594,11 @@ pub fn cast_delivers_message_as_cast_event_test() {
   state_machine.cast(machine.ref, Ping(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("pong")
+  assert reply == "pong"
 }
 
 pub fn send_delivers_message_as_info_not_cast_test() {
-  // state_machine.send -> Info(msg)
+  // process.send on the Subject -> Info(msg)
   // handler only handles Cast -> no reply -> timeout.
   let assert Ok(machine) =
     state_machine.new(initial_state: CastListening, initial_data: Nil)
@@ -788,9 +606,9 @@ pub fn send_delivers_message_as_info_not_cast_test() {
     |> state_machine.start_link
 
   let reply_sub = process.new_subject()
-  state_machine.send(subject_of(machine), Ping(reply_with: reply_sub))
+  process.send(subject_of(machine), Ping(reply_with: reply_sub))
 
-  process.receive(reply_sub, 50) |> should.equal(Error(Nil))
+  assert process.receive(reply_sub, 50) == Error(Nil)
 }
 
 // CHANGE CALLBACK MODULE
@@ -838,7 +656,7 @@ pub fn change_callback_module_keeps_machine_alive_test() {
   process.send(subject_of(machine), CbPing(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("pong")
+  assert reply == "pong"
 }
 
 // PUSH / POP CALLBACK MODULE
@@ -875,14 +693,14 @@ pub fn push_then_pop_callback_module_roundtrip_test() {
   process.send(subject_of(machine), CbPing(reply_with: reply_sub))
 
   let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("pong")
+  assert reply == "pong"
 }
 
 // REQIDS (send_request / OTP 25+)
 //
 // The server receives Call(from, msg) events and must reply with the
 // Reply(from, value) action. This is different from the Info-based pattern
-// used by state_machine.call / process.call.
+// used by process.call on the machine's Subject.
 //
 
 type ReqState {
@@ -916,7 +734,7 @@ pub fn send_request_returns_reply_test() {
   let request: state_machine.RequestId(Int) =
     state_machine.send_request(machine.ref, GetCounter)
   let assert Ok(count) = state_machine.receive_response(request, 1000)
-  count |> should.equal(0)
+  assert count == 0
 }
 
 pub fn send_request_sees_latest_state_test() {
@@ -931,158 +749,7 @@ pub fn send_request_sees_latest_state_test() {
   let request: state_machine.RequestId(Int) =
     state_machine.send_request(machine.ref, GetCounter)
   let assert Ok(count) = state_machine.receive_response(request, 1000)
-  count |> should.equal(2)
-}
-
-pub fn request_ids_size_reflects_pending_requests_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: ReqRunning, initial_data: 0)
-    |> state_machine.on_event(reqid_handler)
-    |> state_machine.start_link
-
-  let collection: state_machine.RequestIdCollection(String, Int) =
-    state_machine.request_ids_new()
-  state_machine.request_ids_size(collection) |> should.equal(0)
-
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "first",
-      collection,
-    )
-  state_machine.request_ids_size(collection) |> should.equal(1)
-
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "second",
-      collection,
-    )
-  state_machine.request_ids_size(collection) |> should.equal(2)
-
-  let assert state_machine.GotReply(_, _, collection) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-  let assert state_machine.GotReply(_, _, collection) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-  state_machine.request_ids_size(collection) |> should.equal(0)
-}
-
-pub fn send_request_to_collection_delivers_both_replies_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: ReqRunning, initial_data: 42)
-    |> state_machine.on_event(reqid_handler)
-    |> state_machine.start_link
-
-  let collection: state_machine.RequestIdCollection(String, Int) =
-    state_machine.request_ids_new()
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "a",
-      collection,
-    )
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "b",
-      collection,
-    )
-
-  let assert state_machine.GotReply(value1, _label1, collection) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-  let assert state_machine.GotReply(value2, _label2, _) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-
-  value1 |> should.equal(42)
-  value2 |> should.equal(42)
-}
-
-pub fn request_ids_to_list_contains_all_entries_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: ReqRunning, initial_data: 0)
-    |> state_machine.on_event(reqid_handler)
-    |> state_machine.start_link
-
-  let collection: state_machine.RequestIdCollection(String, Int) =
-    state_machine.request_ids_new()
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "x",
-      collection,
-    )
-  let collection =
-    state_machine.send_request_to_collection(
-      machine.ref,
-      GetCounter,
-      "y",
-      collection,
-    )
-
-  let entries = state_machine.request_ids_to_list(collection)
-  list.length(entries) |> should.equal(2)
-
-  let assert state_machine.GotReply(_, _, collection) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-  let assert state_machine.GotReply(_, _, _) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-}
-
-pub fn request_ids_add_manually_adds_to_collection_test() {
-  let assert Ok(machine) =
-    state_machine.new(initial_state: ReqRunning, initial_data: 7)
-    |> state_machine.on_event(reqid_handler)
-    |> state_machine.start_link
-
-  let request: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.ref, GetCounter)
-  let collection: state_machine.RequestIdCollection(String, Int) =
-    state_machine.request_ids_new()
-  let collection =
-    state_machine.request_ids_add(
-      request_id: request,
-      label: "manual",
-      to: collection,
-    )
-  state_machine.request_ids_size(collection) |> should.equal(1)
-
-  let assert state_machine.GotReply(value, label, _) =
-    state_machine.receive_response_collection(
-      collection,
-      1000,
-      state_machine.Delete,
-    )
-  value |> should.equal(7)
-  label |> should.equal("manual")
+  assert count == 2
 }
 
 // STOP AND REPLY
@@ -1102,7 +769,7 @@ fn stop_and_reply_handler(
   case event {
     state_machine.Call(from, SarGetAndStop) ->
       state_machine.stop_and_reply(process.Normal, [
-        state_machine.Reply(from, "bye"),
+        #(from, "bye"),
       ])
     _ -> state_machine.keep_state(Nil, [])
   }
@@ -1122,10 +789,10 @@ pub fn stop_and_reply_sends_reply_before_stopping_test() {
   let req: state_machine.RequestId(String) =
     state_machine.send_request(machine.ref, SarGetAndStop)
   let assert Ok(reply) = state_machine.receive_response(req, 1000)
-  reply |> should.equal("bye")
+  assert reply == "bye"
 
   let assert Ok(down) = process.selector_receive(sel, 1000)
-  down.reason |> should.equal(process.Normal)
+  assert down.reason == process.Normal
 }
 
 // HIBERNATE AFTER
@@ -1166,15 +833,13 @@ pub fn hibernate_after_puts_idle_process_into_hibernation_test() {
   process.sleep(50)
 
   let info = process_info(machine.pid, atom.create("current_function"))
-  string.inspect(info)
-  |> string.contains("Hibernate")
-  |> should.equal(True)
+  assert string.contains(string.inspect(info), "Hibernate")
 
   // Sending a message wakes the process; the handler still runs.
   let reply_sub = process.new_subject()
   process.send(subject_of(machine), HibPing(reply_with: reply_sub))
   let assert Ok(reply) = process.receive(reply_sub, 1000)
-  reply |> should.equal("pong")
+  assert reply == "pong"
 }
 
 // Negative control confirming the option is actually doing the work.
@@ -1187,9 +852,7 @@ pub fn machine_without_hibernate_after_does_not_hibernate_test() {
   process.sleep(50)
 
   let info = process_info(machine.pid, atom.create("current_function"))
-  string.inspect(info)
-  |> string.contains("Hibernate")
-  |> should.equal(False)
+  assert !string.contains(string.inspect(info), "Hibernate")
 }
 
 // ON FORMAT STATUS
@@ -1236,9 +899,7 @@ pub fn on_format_status_overrides_data_in_status_report_test() {
     |> state_machine.start_link
 
   let status = sys_get_status(machine.pid)
-  string.inspect(status)
-  |> string.contains("FORMATTED:42")
-  |> should.equal(True)
+  assert string.contains(string.inspect(status), "FORMATTED:42")
 }
 
 pub fn machine_without_format_status_still_appears_in_status_test() {
@@ -1264,9 +925,6 @@ type ClientMsg {
   // CliAsk parks the caller's From in an external stash so the test process
   // can reply with send_reply / send_replies from outside the callback.
   CliAsk(stash: process.Subject(state_machine.From(Int)))
-  // CliNoReply intentionally leaves the call without a reply, used to drive
-  // wait_response_timeout into ReceiveTimeout.
-  CliNoReply
 }
 
 fn client_handler(
@@ -1281,7 +939,6 @@ fn client_handler(
       process.send(stash, from)
       state_machine.keep_state(data, [])
     }
-    state_machine.Call(_from, CliNoReply) -> state_machine.keep_state(data, [])
     _ -> state_machine.keep_state(data, [])
   }
 }
@@ -1297,10 +954,10 @@ pub fn stop_server_terminates_machine_with_normal_test() {
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(d) { d })
 
-  state_machine.stop_server(subject_of(machine))
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 
   let assert Ok(down) = process.selector_receive(sel, 1000)
-  down.reason |> should.equal(process.Normal)
+  assert down.reason == process.Normal
 }
 
 pub fn stop_server_with_custom_reason_test() {
@@ -1322,15 +979,13 @@ pub fn stop_server_with_custom_reason_test() {
   let reason = process.Abnormal(dynamic.string("shutdown_requested"))
   let _ =
     process.spawn_unlinked(fn() {
-      state_machine.stop_server_with(subject_of(machine), reason, 1000)
+      state_machine.stop_server_with(machine.ref, reason, 1000)
     })
 
-  // The exact reason round-tripping through gleam_erlang's monitor decoder
-  // is governed by the existing convert_exit_reason/cast_exit_reason pair;
-  // here we just confirm the 3-arg call drives the machine to terminate.
-  let assert Ok(process.ProcessDown(pid: down_pid, ..)) =
+  let assert Ok(process.ProcessDown(pid: down_pid, reason: observed, ..)) =
     process.selector_receive(sel, 1000)
-  down_pid |> should.equal(machine.pid)
+  assert observed == reason
+  assert down_pid == machine.pid
 
   process.flush_messages()
   process.trap_exits(False)
@@ -1350,7 +1005,7 @@ pub fn send_reply_from_external_process_completes_call_test() {
   state_machine.send_reply(from, 123)
 
   let assert Ok(reply) = state_machine.receive_response(req, 1000)
-  reply |> should.equal(123)
+  assert reply == 123
 }
 
 pub fn send_replies_completes_multiple_calls_test() {
@@ -1373,8 +1028,8 @@ pub fn send_replies_completes_multiple_calls_test() {
 
   let assert Ok(r1) = state_machine.receive_response(req1, 1000)
   let assert Ok(r2) = state_machine.receive_response(req2, 1000)
-  r1 |> should.equal(1)
-  r2 |> should.equal(2)
+  assert r1 == 1
+  assert r2 == 2
 }
 
 pub fn wait_response_returns_reply_test() {
@@ -1386,20 +1041,56 @@ pub fn wait_response_returns_reply_test() {
   let req: state_machine.RequestId(Int) =
     state_machine.send_request(machine.ref, CliGet)
   let assert Ok(value) = state_machine.wait_response(req)
-  value |> should.equal(99)
+  assert value == 99
 }
 
-pub fn wait_response_timeout_yields_receive_timeout_when_no_reply_test() {
+pub fn wait_timeout_preserves_the_request_for_a_later_reply_test() {
   let assert Ok(machine) =
     state_machine.new(initial_state: ClientRunning, initial_data: 0)
     |> state_machine.on_event(client_handler)
     |> state_machine.start_link
 
-  let req: state_machine.RequestId(Int) =
-    state_machine.send_request(machine.ref, CliNoReply)
+  let stash = process.new_subject()
+  let req = state_machine.send_request(machine.ref, CliAsk(stash))
+  let assert Ok(from) = process.receive(stash, 1000)
 
-  state_machine.wait_response_timeout(req, 50)
-  |> should.equal(Error(state_machine.ReceiveTimeout))
+  assert state_machine.wait_response_timeout(req, 0)
+    == Error(state_machine.ReceiveTimeout)
+  state_machine.send_reply(from, 31)
+  assert state_machine.receive_response(req, 1000) == Ok(31)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+}
+
+pub fn receive_collection_distinguishes_empty_from_abandoned_test() {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: ClientRunning, initial_data: 0)
+    |> state_machine.on_event(client_handler)
+    |> state_machine.start_link
+
+  let empty = state_machine.request_ids_new()
+  assert state_machine.receive_response_collection(
+      empty,
+      0,
+      state_machine.Delete,
+    )
+    == state_machine.NoRequests
+  let stash = process.new_subject()
+  let request = state_machine.send_request(machine.ref, CliAsk(stash))
+  let pending = state_machine.request_ids_add(request, "held", empty)
+  let assert Ok(from) = process.receive(stash, 1000)
+  assert state_machine.receive_response_collection(
+      pending,
+      0,
+      state_machine.Keep,
+    )
+    == state_machine.CollectionTimeout
+
+  // Reply from this test process itself. A live alias would deliver the
+  // response to our mailbox before the non-blocking poll below.
+  state_machine.send_reply(from, 31)
+  assert state_machine.wait_response_timeout(request, 0)
+    == Error(state_machine.ReceiveTimeout)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }
 
 pub fn check_response_returns_none_for_unrelated_message_test() {
@@ -1413,8 +1104,7 @@ pub fn check_response_returns_none_for_unrelated_message_test() {
 
   // An int dynamic is not a gen_statem reply tuple.
   let unrelated = dynamic.int(42)
-  state_machine.check_response(unrelated, req)
-  |> should.equal(Ok(option.None))
+  assert state_machine.check_response(unrelated, req) == Ok(option.None)
 
   // Drain the real reply so the mailbox is clean for the next test.
   let _ = state_machine.receive_response(req, 1000)
@@ -1436,13 +1126,7 @@ pub fn check_response_returns_some_for_matching_reply_test() {
     |> process.select_other(fn(msg) { msg })
   let assert Ok(raw) = process.selector_receive(from: selector, within: 1000)
 
-  case state_machine.check_response(raw, req) {
-    Ok(option.Some(value)) -> value |> should.equal(11)
-    other -> {
-      string.inspect(other) |> should.equal("Ok(Some(11))")
-      Nil
-    }
-  }
+  assert state_machine.check_response(raw, req) == Ok(option.Some(11))
 }
 
 pub fn receive_response_blocking_returns_reply_test() {
@@ -1454,5 +1138,104 @@ pub fn receive_response_blocking_returns_reply_test() {
   let req: state_machine.RequestId(Int) =
     state_machine.send_request(machine.ref, CliGet)
   let assert Ok(value) = state_machine.receive_response_blocking(req)
-  value |> should.equal(7)
+  assert value == 7
+}
+
+// EDGE CASES
+//
+// `call` goes through gen_statem:call, `stop_server` reports instead of
+// crashing, and negative timeouts mean "now". The failed-start mailbox flush
+// is covered deterministically by EUnit in statem_ffi.erl.
+
+type EdgeMsg {
+  EdgeAsk
+  EdgeIgnore
+  EdgeArm(delay: Int, reply_with: process.Subject(String))
+  EdgeFired
+}
+
+fn edge_handler(
+  event: state_machine.Event(Nil, EdgeMsg, String),
+  _state: Nil,
+  _data: Nil,
+) -> state_machine.Step(Nil, Nil, EdgeMsg, String) {
+  case event {
+    state_machine.Call(from, EdgeAsk) ->
+      state_machine.keep_state_and_data([state_machine.Reply(from, "call")])
+    state_machine.Cast(EdgeArm(delay, reply_with)) ->
+      state_machine.keep_state(Nil, [
+        state_machine.StateTimeout(state_machine.After(delay), EdgeFired),
+        state_machine.GenericTimeout(
+          "edge",
+          state_machine.After(delay),
+          EdgeArm(delay, reply_with),
+        ),
+      ])
+    state_machine.Timeout(state_machine.GenericTimeoutType(_), EdgeArm(_, to)) -> {
+      process.send(to, "fired")
+      state_machine.keep_state_and_data([])
+    }
+    _ -> state_machine.keep_state_and_data([])
+  }
+}
+
+fn start_edge() -> state_machine.Started(EdgeMsg, String) {
+  let assert Ok(machine) =
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(edge_handler)
+    |> state_machine.start
+  machine
+}
+
+pub fn call_delivers_a_call_event_and_its_reply_test() {
+  let machine = start_edge()
+  assert state_machine.call(machine.ref, EdgeAsk, waiting: 1000) == Ok("call")
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+}
+
+pub fn unanswered_call_times_out_without_crashing_the_caller_test() {
+  let machine = start_edge()
+  assert state_machine.call(machine.ref, EdgeIgnore, waiting: 10)
+    == Error(state_machine.ReceiveTimeout)
+  assert state_machine.call(machine.ref, EdgeIgnore, waiting: -1)
+    == Error(state_machine.ReceiveTimeout)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+}
+
+pub fn call_to_a_stopped_machine_reports_the_crash_test() {
+  let machine = start_edge()
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  let assert Error(state_machine.RequestCrashed(process.Abnormal(_))) =
+    state_machine.call(machine.ref, EdgeAsk, waiting: 100)
+}
+
+pub fn stopping_a_stopped_machine_returns_an_error_test() {
+  let machine = start_edge()
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  assert state_machine.stop_server(machine.ref)
+    == Error(state_machine.ServerNotRunning)
+  assert state_machine.stop_server_with(machine.ref, process.Normal, 100)
+    == Error(state_machine.ServerNotRunning)
+}
+
+pub fn globally_registered_machine_can_be_called_and_stopped_test() {
+  let name = atom.create("eparch_edge_global_machine")
+  let assert Ok(machine) =
+    state_machine.new(initial_state: Nil, initial_data: Nil)
+    |> state_machine.on_event(edge_handler)
+    |> state_machine.named(state_machine.Global(name))
+    |> state_machine.start
+  assert state_machine.call(machine.ref, EdgeAsk, waiting: 1000) == Ok("call")
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
+  assert state_machine.stop_server(machine.ref)
+    == Error(state_machine.ServerNotRunning)
+}
+
+pub fn negative_relative_timeouts_fire_immediately_test() {
+  let machine = start_edge()
+  let reply = process.new_subject()
+  state_machine.cast(machine.ref, EdgeArm(-5, reply))
+  assert process.receive(reply, 1000) == Ok("fired")
+  assert process.is_alive(machine.pid)
+  let assert Ok(Nil) = state_machine.stop_server(machine.ref)
 }

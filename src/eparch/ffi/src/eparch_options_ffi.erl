@@ -1,7 +1,7 @@
 -module(eparch_options_ffi).
 -moduledoc """
 Shared encoders for the start-option types defined in `eparch/start_options`.
-Used by both `statem_ffi` and `event_manager_ffi` so the Gleam-to-Erlang
+Used by `statem_ffi` so the Gleam-to-Erlang
 mapping for `Timeout`, `DebugFlag`, `SpawnOption`, `Priority`, and
 `MessageQueueMode` lives in exactly one place.
 """.

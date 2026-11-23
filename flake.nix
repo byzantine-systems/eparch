@@ -105,44 +105,66 @@
             programs.erlfmt.enable = true;
             programs.gleam.enable = true;
             programs.nixfmt.enable = true;
+            programs.ruff-check.enable = true;
+            programs.ruff-format.enable = true;
           };
 
-          devenv.shells.default = {
-            # https://devenv.sh/reference/options/
-            # builtins.getEnv works in --no-pure-eval (direnv); falls back to
-            # the store path for pure-eval (nix flake check) to satisfy the
-            # devenv assertion without attempting any filesystem writes.
-            devenv.root =
-              let
-                r = builtins.getEnv "PWD";
-              in
-              if r != "" then r else builtins.toString ./.;
+          devenv.shells.default =
+            let
+              # builtins.getEnv works in --no-pure-eval (direnv); falls back to
+              # the store path for pure-eval (nix flake check) to satisfy the
+              # devenv assertion without attempting any filesystem writes.
+              pwd = builtins.getEnv "PWD";
+              root = if pwd != "" then pwd else builtins.toString ./.;
+            in
+            {
+              # https://devenv.sh/reference/options/
+              devenv.root = root;
 
-            packages =
-              with pkgs;
-              [
-                # Erlang tooling
-                erlfmt
-                erlang-language-platform
-                rebar3
+              packages =
+                with pkgs;
+                [
+                  # Erlang tooling
+                  erlfmt
+                  erlang-language-platform
+                  rebar3
 
-                # Extra tooling
-                gnumake
-              ]
-              ++ [ config.packages.default ];
+                  # Extra tooling
+                  gnumake
 
-            languages.erlang = {
-              enable = true;
+                  # Python type checking for the Antithesis driver
+                  pyrefly
+                ]
+                ++ [ config.packages.default ];
+
+              languages.erlang = {
+                enable = true;
+              };
+
+              languages.gleam = {
+                enable = true;
+              };
+
+              # The Antithesis driver is a uv project under antithesis/;
+              # entering the shell syncs its venv, dev group included.
+              languages.python = {
+                enable = true;
+                package = pkgs.python314;
+                directory = "${root}/antithesis";
+                venv.enable = true;
+                uv = {
+                  enable = true;
+                  sync = {
+                    enable = true;
+                    allGroups = true;
+                  };
+                };
+              };
+
+              enterShell = ''
+                echo "Starting Development Environment..."
+              '';
             };
-
-            languages.gleam = {
-              enable = true;
-            };
-
-            enterShell = ''
-              echo "Starting Development Environment..."
-            '';
-          };
         };
     };
 }

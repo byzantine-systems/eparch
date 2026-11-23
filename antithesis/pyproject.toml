@@ -1,0 +1,37 @@
+[project]
+name = "eparch-antithesis"
+version = "0.1.0"
+description = "Bridge from eparch's Gleam workload verdicts to Antithesis SDK assertions"
+readme = "README.md"
+license = "LGPL-3.0-or-later"
+# The Antithesis image ships Python 3.13; the devenv uses 3.14.
+requires-python = ">=3.13"
+dependencies = ["antithesis==0.4.1"]
+
+[project.scripts]
+eparch-antithesis = "eparch_antithesis.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config"]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Running the BEAM is the driver's whole job; arguments are a fixed vocabulary.
+"src/eparch_antithesis/workload.py" = ["S603"]
+"tests/**" = ["S101"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]

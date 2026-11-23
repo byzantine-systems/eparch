@@ -4,14 +4,14 @@ Door Lock example for `eparch/state_machine`, based on the [OTP Door Lock exampl
 
 ```mermaid
 stateDiagram
-    Locked --> Open   : last N buttons equal code
-    Open   --> Locked : 10-second timeout
-    Locked --> Locked : collect newest N buttons
+    Locked --> Open   : last digit of the code
+    Locked --> Locked : next expected digit, or wrong digit (reset)
+    Open   --> Locked : 5-second timeout
 ```
 
-The machine keeps a rolling window containing at most the last N keypad digits, where N is the configured code length. Entering `Locked` prints `Lock` and clears that window. Entering `Open` prints `Unlock` and starts the configurable state timeout. Buttons pressed while open are ignored and do not restart it.
+The machine matches keypad digits against the code one at a time. A correct digit advances to the next one; a wrong digit resets to the start of the code. Entering `Locked` resets the expected digits, and entering `Open` arms the auto-lock state timeout. Buttons pressed while open are ignored and do not restart it.
 
-The default auto-lock delay is 10 seconds. `start_with_lock_timeout` permits a different delay, primarily for integration tests. An empty code is accepted but can never open the lock.
+The default auto-lock delay is 5 seconds. `start_with_lock_timeout` permits a different delay, primarily for integration tests. An empty code is accepted but can never open the lock.
 
 ## Usage
 
@@ -25,6 +25,6 @@ pub fn main() {
   doorlock.enter_code(machine.ref, [0, 0, 0, 0]) // returns Nil asynchronously
   doorlock.enter_code(machine.ref, [1, 2, 3, 4]) // returns Nil asynchronously
   doorlock.get_status(machine.ref) // Open
-  // After 10 seconds the door auto-locks back to Locked.
+  // After 5 seconds the door auto-locks back to Locked.
 }
 ```

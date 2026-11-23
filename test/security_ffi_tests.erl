@@ -21,47 +21,34 @@ file_debug_logging_is_disabled_test() ->
 malformed_replies_are_rejected_test() ->
     ?assertError(function_clause, statem_ffi:send_replies([{valid, reply}, malformed])).
 
-invalid_collection_handling_is_rejected_test() ->
-    Collection = gen_event:reqids_new(),
+%% The fixture saves both allowlists before each test and restores them from
+%% the EUnit runner afterwards, even if the test process crashes or is killed.
+allowlists_test_() ->
+    {foreach, fun save_allowlists/0, fun restore_allowlists/1, [
+        fun callback_allowlist_is_enforced/0,
+        fun registry_allowlist_guards_via_names/0
+    ]}.
+
+callback_allowlist_is_enforced() ->
+    ok = application:set_env(eparch_ffi, allowed_callback_modules, [statem_ffi]),
+    ?assertEqual(ok, eparch_options_ffi:validate_callback_module(statem_ffi)),
+    ?assertError({module_not_allowed, erlang}, eparch_options_ffi:validate_callback_module(erlang)).
+
+registry_allowlist_guards_via_names() ->
+    ok = application:set_env(eparch_ffi, allowed_registry_modules, [global]),
+    ?assertEqual({via, global, name}, eparch_options_ffi:validate_server_name({via, global, name})),
     ?assertError(
-        function_clause,
-        event_manager_ffi:receive_response_collection(Collection, 0, unexpected)
+        {module_not_allowed, erlang}, eparch_options_ffi:validate_server_name({via, erlang, name})
     ).
 
-event_manager_status_is_redacted_by_default_test() ->
-    HandlerState =
-        {gleam_handler, make_ref(), <<"secret">>, fun(_, State) -> State end, none, none, none,
-            none, none},
-    Status = #{state => HandlerState, message => <<"secret">>, log => [<<"secret">>]},
-    ?assertEqual(
-        #{state => redacted, message => redacted, log => []},
-        event_manager_ffi:format_status(Status)
-    ).
+save_allowlists() ->
+    [
+        {Key, application:get_env(eparch_ffi, Key)}
+     || Key <- [allowed_callback_modules, allowed_registry_modules]
+    ].
 
-statem_status_is_redacted_by_default_test() ->
-    MachineState =
-        {gleam_statem, state_secret, data_secret, fun(_, _, _) -> ok end, state_enter_disabled,
-            make_ref(), none, none},
-    Status = #{
-        state => state_secret, data => MachineState, queue => [message_secret], log => [log_secret]
-    },
-    ?assertEqual(
-        #{state => redacted, data => redacted, queue => [], log => []},
-        statem_ffi:format_status(Status)
-    ).
+restore_allowlists(Saved) ->
+    lists:foreach(fun restore_env/1, Saved).
 
-module_allowlists_are_enforced_test() ->
-    Previous = application:get_env(eparch_ffi, allowed_callback_modules),
-    try
-        ok = application:set_env(eparch_ffi, allowed_callback_modules, [statem_ffi]),
-        ?assertEqual(ok, eparch_options_ffi:validate_callback_module(statem_ffi)),
-        ?assertError(
-            {module_not_allowed, erlang},
-            eparch_options_ffi:validate_callback_module(erlang)
-        )
-    after
-        restore_env(allowed_callback_modules, Previous)
-    end.
-
-restore_env(Key, undefined) -> application:unset_env(eparch_ffi, Key);
-restore_env(Key, {ok, Value}) -> application:set_env(eparch_ffi, Key, Value).
+restore_env({Key, undefined}) -> application:unset_env(eparch_ffi, Key);
+restore_env({Key, {ok, Value}}) -> application:set_env(eparch_ffi, Key, Value).

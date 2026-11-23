@@ -1,6 +1,6 @@
 # Terminal Logger
 
-`gen_event` example for `eparch/event_manager`. Modelled after the
+Actor-based broadcast example for `eparch/event_manager`. Modelled after the
 canonical [`error_man` example from the OTP docs](https://www.erlang.org/doc/system/events.html).
 
 ```mermaid
@@ -34,18 +34,21 @@ two handler flavours:
 
 ```gleam
 import terminal_logger
+import gleam/io
 
 pub fn main() {
   let assert Ok(manager) = terminal_logger.start()
 
   let assert Ok(_term_ref) = terminal_logger.add_terminal_logger(manager)
   let assert Ok(_file_ref) =
-    terminal_logger.add_file_logger(manager, "errors.txt")
+    terminal_logger.add_file_logger(manager, "errors.txt", on_error: fn(failure) {
+      io.println_error("Could not append to " <> failure.path)
+    })
 
   terminal_logger.report(manager, "no_reply")
   // stdout:       ***Error*** no_reply
   // errors.txt:   ***Error*** no_reply
 
-  terminal_logger.stop(manager)
+  let assert Ok(Nil) = terminal_logger.stop(manager)
 }
 ```

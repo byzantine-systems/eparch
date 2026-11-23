@@ -1,0 +1,15 @@
+**
+!gleam.toml
+!manifest.toml
+!src/
+!src/**
+src/**/_build/
+!dev/
+!dev/**
+!antithesis/
+!antithesis/pyproject.toml
+!antithesis/README.md
+!antithesis/src/
+!antithesis/src/**
+!antithesis/templates/
+!antithesis/templates/**
