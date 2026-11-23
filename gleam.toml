@@ -23,5 +23,4 @@ qcheck = ">= 1.0.5 and < 2.0.0"
 pages = [
     { title = "Examples", path = "examples/readme.html", source = "./examples/README.md" },
     { title = "Quick Start", path = "docs/quick_start.html", source = "./docs/Quick_Start.md" },
-    { title = " ", path = "#", source = "" },
 ]
